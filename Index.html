@@ -1,0 +1,1971 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ConsultDesk — Pronto Digital SA</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useMemo, useCallback, useRef } = React;
+
+/* ---- tiny dependency-free stand-ins for the icons used throughout ---- */
+const Icon = ({ children }) => React.createElement("span", { "aria-hidden": true, style: { display: "inline-block", width: 14, textAlign: "center" } }, children);
+const mkIcon = (glyph) => (props) => React.createElement(Icon, null, glyph);
+const LayoutDashboard = mkIcon("▦"); const Users = mkIcon("👥"); const FolderKanban = mkIcon("📁");
+const Clock = mkIcon("🕐"); const CalendarDays = mkIcon("📅"); const Receipt = mkIcon("🧾");
+const Mail = mkIcon("✉"); const Plus = mkIcon("＋"); const X = mkIcon("✕");
+const Pencil = mkIcon("✎"); const Trash2 = mkIcon("🗑"); const Copy = mkIcon("⧉");
+const Check = mkIcon("✓"); const ChevronRight = mkIcon("›"); const Search = mkIcon("🔍");
+const DollarSign = mkIcon("$"); const Play = mkIcon("▶"); const Pause = mkIcon("⏸");
+const FileText = mkIcon("📄"); const Send = mkIcon("➤"); const CircleCheck = mkIcon("✔");
+const AlertCircle = mkIcon("!"); const Settings = mkIcon("⚙"); const NotebookPen = mkIcon("📝");
+const Printer = mkIcon("🖶"); const BarChart3 = mkIcon("📊"); const Repeat = mkIcon("↻");
+const UserCheck = mkIcon("🙋"); const LogOut = mkIcon("⎋");
+
+/* ---- Supabase client (loaded from CDN as window.supabase) ---- */
+const SUPABASE_URL = "https://ziladpnlfajtiboavwvn.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_9PPylQ1CDhMUvQFuE3nW3Q__pTIhYjb";
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { db: { schema: "consultdesk" } });
+
+const toSnake = (s) => s.replace(/[A-Z]/g, (m) => "_" + m.toLowerCase());
+const toCamel = (s) => s.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+function keysToDb(obj) {
+  const out = {};
+  Object.entries(obj).forEach(([k, v]) => {
+    if (k === "id" || k === "createdAt") return;
+    out[toSnake(k)] = v === "" ? null : v;
+  });
+  return out;
+}
+function keysFromDb(row) {
+  const out = {};
+  Object.entries(row).forEach(([k, v]) => { out[toCamel(k)] = v; });
+  return out;
+}
+
+
+/**
+ * Same shape as the original artifact's useCollection hook —
+ * { items, ready, add, update, remove, setAll } — so all the existing
+ * view components work unchanged, just backed by Supabase instead of
+ * window.storage.
+ */
+function useSupabaseCollection(table, orderColumn = "created_at") {
+  const [items, setItems] = useState([]);
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await sb
+        .from(table)
+        .select("*")
+        .order(orderColumn, { ascending: false });
+      if (cancelled) return;
+      if (error) {
+        console.error(`Failed to load ${table}:`, error.message);
+        setItems([]);
+      } else {
+        setItems(data.map(keysFromDb));
+      }
+      setReady(true);
+    })();
+    return () => { cancelled = true; };
+  }, [table, orderColumn]);
+
+  const add = useCallback(async (item) => {
+    const { data, error } = await sb
+      .from(table)
+      .insert(keysToDb(item))
+      .select()
+      .single();
+    if (error) {
+      console.error(`Failed to add to ${table}:`, error.message);
+      return;
+    }
+    setItems((prev) => [keysFromDb(data), ...prev]);
+  }, [table]);
+
+  const update = useCallback(async (id, patch) => {
+    const { data, error } = await sb
+      .from(table)
+      .update(keysToDb(patch))
+      .eq("id", id)
+      .select()
+      .single();
+    if (error) {
+      console.error(`Failed to update ${table}:`, error.message);
+      return;
+    }
+    setItems((prev) => prev.map((it) => (it.id === id ? keysFromDb(data) : it)));
+  }, [table]);
+
+  const remove = useCallback(async (id) => {
+    const { error } = await sb.from(table).delete().eq("id", id);
+    if (error) {
+      console.error(`Failed to delete from ${table}:`, error.message);
+      return;
+    }
+    setItems((prev) => prev.filter((it) => it.id !== id));
+  }, [table]);
+
+  // Bulk replace — used by automations (overdue flip, retainer generation)
+  // and by the billing flow marking several time entries as billed at once.
+  const setAll = useCallback(async (next) => {
+    const existingIds = new Set(items.map((it) => it.id));
+    const toInsert = next.filter((it) => !it.id || !existingIds.has(it.id));
+    const toUpdate = next.filter((it) => it.id && existingIds.has(it.id));
+
+    if (toInsert.length) {
+      const { error } = await sb.from(table).insert(toInsert.map(keysToDb));
+      if (error) console.error(`Bulk insert into ${table} failed:`, error.message);
+    }
+    for (const it of toUpdate) {
+      const { error } = await sb.from(table).update(keysToDb(it)).eq("id", it.id);
+      if (error) console.error(`Bulk update on ${table} failed:`, error.message);
+    }
+
+    // Re-fetch so generated ids/defaults come back from the DB.
+    const { data, error } = await sb
+      .from(table)
+      .select("*")
+      .order(orderColumn, { ascending: false });
+    if (!error) setItems(data.map(keysFromDb));
+  }, [table, items, orderColumn]);
+
+  return { items, ready, add, update, remove, setAll };
+}
+
+const DEFAULT_SETTINGS = {
+  companyName: "Pronto Digital SA",
+  companyEmail: "",
+  companyAddress: "",
+  invoicePrefix: "INV",
+  defaultHourlyRate: 100,
+  defaultCurrency: "USD",
+};
+
+function useSupabaseSettings() {
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await sb.from("settings").select("*").eq("id", 1).single();
+      if (cancelled) return;
+      if (!error && data) setSettings({ ...DEFAULT_SETTINGS, ...keysFromDb(data) });
+      setReady(true);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const save = useCallback(async (next) => {
+    setSettings(next);
+    const { error } = await sb.from("settings").update(keysToDb(next)).eq("id", 1);
+    if (error) console.error("Failed to save settings:", error.message);
+  }, []);
+
+  return { settings, ready, save };
+}
+
+/* ---- timer: plain localStorage is fine in a real deployed app ---- */
+function useTimer() {
+  const [timer, setTimer] = useState(() => {
+    try {
+      const raw = localStorage.getItem("cd_activeTimer");
+      return raw ? JSON.parse(raw) : null;
+    } catch { return null; }
+  });
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    if (!timer) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [timer]);
+
+  const start = useCallback((projectId, description) => {
+    const t = { projectId, description: description || "", startedAt: new Date().toISOString() };
+    setTimer(t);
+    localStorage.setItem("cd_activeTimer", JSON.stringify(t));
+  }, []);
+
+  const clear = useCallback(() => {
+    setTimer(null);
+    localStorage.removeItem("cd_activeTimer");
+  }, []);
+
+  const elapsedMs = timer ? Math.max(0, now - new Date(timer.startedAt).getTime()) : 0;
+  return { timer, ready: true, start, clear, elapsedMs };
+}
+
+function useAuth() {
+  const [session, setSession] = useState(null);
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    sb.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setReady(true);
+    });
+    const { data: sub } = sb.auth.onAuthStateChange((_event, sess) => {
+      setSession(sess);
+    });
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  return { session, ready };
+}
+
+function LoginScreen() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+    const { error } = await sb.auth.signInWithPassword({ email, password });
+    setLoading(false);
+    if (error) setError(error.message);
+  };
+
+  return (
+    <div className="cd-login-root">
+      <style>{LOGIN_CSS}</style>
+      <form className="cd-login-card" onSubmit={submit}>
+        <div className="cd-login-mark">{"</>"}</div>
+        <div className="cd-login-title">Pronto Digital SA</div>
+        <div className="cd-login-sub">Sign in to ConsultDesk</div>
+        <label className="cd-login-field">
+          <span>Email</span>
+          <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} autoFocus />
+        </label>
+        <label className="cd-login-field">
+          <span>Password</span>
+          <input type="password" required value={password} onChange={(e) => setPassword(e.target.value)} />
+        </label>
+        {error && <div className="cd-login-error">{error}</div>}
+        <button className="cd-login-btn" type="submit" disabled={loading}>
+          {loading ? "Signing in…" : "Sign in"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+const LOGIN_CSS = `
+.cd-login-root{min-height:100vh;display:flex;align-items:center;justify-content:center;background:#F5F6F3;font-family:Calibri,Candara,'Segoe UI',Optima,Helvetica,Arial,sans-serif;}
+.cd-login-card{width:340px;background:#fff;border:1px solid #E3E1DA;border-radius:14px;padding:32px 28px;display:flex;flex-direction:column;gap:14px;box-shadow:0 20px 60px rgba(0,0,0,0.08);}
+.cd-login-mark{font-family:'SF Mono',ui-monospace,monospace;font-size:15px;color:#C6702B;background:rgba(198,112,43,0.12);border-radius:6px;padding:5px 8px;width:fit-content;}
+.cd-login-title{font-size:19px;font-weight:700;color:#1B4B54;}
+.cd-login-sub{font-size:13px;color:#5B616E;margin-top:-8px;margin-bottom:6px;}
+.cd-login-field{display:flex;flex-direction:column;gap:5px;font-size:12px;color:#5B616E;font-weight:600;}
+.cd-login-field input{font-size:14px;color:#14171F;border:1px solid #E3E1DA;border-radius:8px;padding:9px 11px;outline:none;font-family:inherit;}
+.cd-login-field input:focus{border-color:#1E5F5A;}
+.cd-login-error{font-size:12.5px;color:#B23A3A;background:#F6DEDD;border-radius:7px;padding:8px 10px;}
+.cd-login-btn{margin-top:4px;background:#14171F;color:#fff;border:none;border-radius:8px;padding:10px;font-size:14px;font-weight:600;cursor:pointer;}
+.cd-login-btn:disabled{opacity:0.6;cursor:not-allowed;}
+`;
+
+// table names, kept as constants so App() below reads exactly like the
+// original artifact but resolves to the real Postgres tables
+const useCollection = (table) => useSupabaseCollection(table);
+const useSettings = () => useSupabaseSettings();
+
+/* ---------------------------------------------------------------------
+   ConsultDesk — client / project / hours / billing tracker for a
+   solo app-development consultancy.
+--------------------------------------------------------------------- */
+
+const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+const todayISO = () => new Date().toISOString().slice(0, 10);
+const CURRENCIES = {
+  USD: { symbol: "$", label: "US$ — US Dollar" },
+  ZAR: { symbol: "R", label: "R — South African Rand" },
+};
+const CURRENCY_CODES = Object.keys(CURRENCIES);
+const fmtMoney = (n, currency = "USD") => {
+  const sym = (CURRENCIES[currency] || CURRENCIES.USD).symbol;
+  return `${sym}${(Number(n) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+};
+const fmtDate = (iso) => {
+  if (!iso) return "—";
+  const d = new Date(iso + "T00:00:00");
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+};
+const fmtHrs = (n) => `${(Number(n) || 0).toFixed(2)}h`;
+const monthLabel = (ym) => new Date(ym + "-01T00:00:00").toLocaleDateString(undefined, { month: "long", year: "numeric" });
+const monthLabelShort = (ym) => new Date(ym + "-01T00:00:00").toLocaleDateString(undefined, { month: "short", year: "numeric" });
+
+const STATUS_COLORS = {
+  active: "var(--accent)", paused: "var(--amber)", completed: "var(--ink-soft)",
+  draft: "var(--ink-soft)", sent: "var(--amber)", paid: "var(--success)", overdue: "var(--danger)",
+};
+
+/* ------------------------------ shell UI ------------------------------ */
+const NAV = [
+  { key: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { key: "clients", label: "Clients", icon: Users },
+  { key: "projects", label: "Projects", icon: FolderKanban },
+  { key: "time", label: "Time", icon: Clock },
+  { key: "schedule", label: "Schedule", icon: CalendarDays },
+  { key: "billing", label: "Billing", icon: Receipt },
+  { key: "messages", label: "Messages", icon: Mail },
+  { key: "reports", label: "Reports", icon: BarChart3 },
+  { key: "admin", label: "Admin", icon: Settings },
+];
+
+function App() {
+  const [tab, setTab] = useState("dashboard");
+
+  const clients = useCollection("clients");
+  const projects = useCollection("projects");
+  const timeEntries = useCollection("time_entries");
+  const meetings = useCollection("meetings");
+  const invoices = useCollection("invoices");
+  const clientNotes = useCollection("client_notes");
+  const comms = useCollection("comms");
+  const settingsHook = useSettings();
+
+  const ctx = { clients, projects, timeEntries, meetings, invoices, clientNotes, comms, settings: settingsHook };
+  const loading = !clients.ready || !projects.ready || !timeEntries.ready || !meetings.ready || !invoices.ready || !clientNotes.ready || !comms.ready || !settingsHook.ready;
+
+  // Automations: run once per session after data loads — flip overdue invoices,
+  // and generate draft retainer invoices for active retainer projects that are due.
+  const automationRan = useRef(false);
+  useEffect(() => {
+    if (loading || automationRan.current) return;
+    automationRan.current = true;
+
+    const today = todayISO();
+    const monthKey = today.slice(0, 7);
+    const todayDay = Number(today.slice(8, 10));
+
+    const overdueApplied = invoices.items.map((inv) =>
+      inv.status === "sent" && inv.dueDate && inv.dueDate < today ? { ...inv, status: "overdue" } : inv
+    );
+
+    const existingRetainerKeys = new Set(invoices.items.map((i) => i.retainerKey).filter(Boolean));
+    const newRetainer = [];
+    projects.items.forEach((p) => {
+      if (!p.isRetainer || p.status !== "active") return;
+      const key = `${p.id}-${monthKey}`;
+      const billDay = Number(p.retainerDay) || 1;
+      if (todayDay >= billDay && !existingRetainerKeys.has(key)) {
+        newRetainer.push({
+          id: uid(), createdAt: today,
+          clientId: p.clientId,
+          currency: p.currency || "USD",
+          date: today,
+          dueDate: (() => { const d = new Date(); d.setDate(d.getDate() + 14); return d.toISOString().slice(0, 10); })(),
+          lineItems: [{ desc: `Monthly retainer — ${p.name} (${monthLabel(monthKey)})`, amount: Number(p.retainerAmount) || 0 }],
+          status: "draft",
+          number: nextInvoiceNumber([...invoices.items, ...newRetainer], settingsHook.settings.invoicePrefix),
+          retainerKey: key,
+        });
+      }
+    });
+
+    const changedOverdue = overdueApplied.some((inv, i) => inv.status !== invoices.items[i].status);
+    if (changedOverdue || newRetainer.length) {
+      invoices.setAll([...newRetainer, ...overdueApplied]);
+    }
+  }, [loading]);
+
+  return (
+    <div className="cd-root">
+      <style>{CSS}</style>
+      <aside className="cd-sidebar">
+        <div className="cd-brand">
+          <span className="cd-brand-mark">{"</>"}</span>
+          <div>
+            <div className="cd-brand-name">{settingsHook.settings.companyName || "ConsultDesk"}</div>
+            <div className="cd-brand-sub">practice ledger</div>
+          </div>
+        </div>
+        <nav className="cd-nav">
+          {NAV.map((n) => (
+            <button
+              key={n.key}
+              className={"cd-nav-item" + (tab === n.key ? " active" : "")}
+              onClick={() => setTab(n.key)}
+            >
+              <n.icon size={17} strokeWidth={1.8} />
+              <span>{n.label}</span>
+            </button>
+          ))}
+        </nav>
+        <button className="cd-sidebar-signout" onClick={() => sb.auth.signOut()}>
+          <LogOut size={14} /> Sign out
+        </button>
+      </aside>
+
+      <main className="cd-main">
+        {loading ? (
+          <div className="cd-loading">loading ledger…</div>
+        ) : (
+          <>
+            {tab === "dashboard" && <Dashboard ctx={ctx} goTo={setTab} />}
+            {tab === "clients" && <ClientsView ctx={ctx} />}
+            {tab === "projects" && <ProjectsView ctx={ctx} />}
+            {tab === "time" && <TimeView ctx={ctx} />}
+            {tab === "schedule" && <ScheduleView ctx={ctx} />}
+            {tab === "billing" && <BillingView ctx={ctx} />}
+            {tab === "messages" && <MessagesView ctx={ctx} />}
+            {tab === "reports" && <ReportsView ctx={ctx} />}
+            {tab === "admin" && <AdminView ctx={ctx} />}
+          </>
+        )}
+      </main>
+    </div>
+  );
+}
+
+/* ------------------------------ shared bits ------------------------------ */
+function PageHead({ eyebrow, title, action }) {
+  return (
+    <div className="cd-pagehead">
+      <div>
+        <div className="cd-eyebrow">{eyebrow}</div>
+        <h1>{title}</h1>
+      </div>
+      {action}
+    </div>
+  );
+}
+
+function Stamp({ status }) {
+  return (
+    <span className="cd-stamp" style={{ "--stamp-color": STATUS_COLORS[status] || "var(--ink-soft)" }}>
+      {status}
+    </span>
+  );
+}
+
+function Empty({ icon: Icon, title, hint, action }) {
+  return (
+    <div className="cd-empty">
+      <Icon size={26} strokeWidth={1.5} />
+      <div className="cd-empty-title">{title}</div>
+      {hint && <div className="cd-empty-hint">{hint}</div>}
+      {action}
+    </div>
+  );
+}
+
+function Modal({ title, onClose, children, wide }) {
+  return (
+    <div className="cd-modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className={"cd-modal" + (wide ? " wide" : "")}>
+        <div className="cd-modal-head">
+          <h3>{title}</h3>
+          <button className="cd-iconbtn" onClick={onClose}><X size={18} /></button>
+        </div>
+        <div className="cd-modal-body">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, children }) {
+  return (
+    <label className="cd-field">
+      <span>{label}</span>
+      {children}
+    </label>
+  );
+}
+
+function Btn({ children, onClick, kind = "default", type = "button", icon: Icon, disabled }) {
+  return (
+    <button type={type} className={`cd-btn ${kind}`} onClick={onClick} disabled={disabled}>
+      {Icon && <Icon size={15} strokeWidth={2} />}
+      {children}
+    </button>
+  );
+}
+
+function clientName(clients, id) {
+  const c = clients.items.find((x) => x.id === id);
+  return c ? (c.company || c.name) : "—";
+}
+function projectName(projects, id) {
+  const p = projects.items.find((x) => x.id === id);
+  return p ? p.name : "—";
+}
+
+/* ------------------------------ Dashboard ------------------------------ */
+function Dashboard({ ctx, goTo }) {
+  const { clients, projects, timeEntries, meetings, invoices, comms } = ctx;
+  const [logging, setLogging] = useState(false);
+
+  const activeProjects = projects.items.filter((p) => p.status === "active");
+  const unbilledHours = timeEntries.items.filter((t) => !t.billed).reduce((s, t) => s + Number(t.hours || 0), 0);
+  const outstandingByCurrency = {};
+  invoices.items.filter((i) => i.status === "sent" || i.status === "overdue").forEach((i) => {
+    const cur = i.currency || "USD";
+    outstandingByCurrency[cur] = (outstandingByCurrency[cur] || 0) + invoiceTotal(i);
+  });
+  const outstandingLabel = Object.keys(outstandingByCurrency).length === 0
+    ? fmtMoney(0)
+    : Object.entries(outstandingByCurrency).map(([cur, amt]) => fmtMoney(amt, cur)).join(" · ");
+
+  const now = new Date();
+  const weekStart = new Date(now); weekStart.setDate(now.getDate() - now.getDay());
+  const days = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(weekStart); d.setDate(weekStart.getDate() + i);
+    return d.toISOString().slice(0, 10);
+  });
+  const hoursByDay = days.map((iso) => timeEntries.items.filter((t) => t.date === iso).reduce((s, t) => s + Number(t.hours || 0), 0));
+  const maxHrs = Math.max(4, ...hoursByDay);
+
+  const upcoming = meetings.items
+    .filter((m) => m.date >= todayISO())
+    .sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time))
+    .slice(0, 4);
+
+  const recentTime = [...timeEntries.items].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
+
+  const followUps = clients.items.filter((c) => {
+    const hasActiveProject = projects.items.some((p) => p.clientId === c.id && p.status === "active");
+    if (!hasActiveProject) return false;
+    const clientComms = comms.items.filter((k) => k.clientId === c.id);
+    if (clientComms.length === 0) return true;
+    const lastDate = clientComms.reduce((max, k) => (k.date > max ? k.date : max), "0000-00-00");
+    const daysSince = (new Date(todayISO()) - new Date(lastDate)) / 86400000;
+    return daysSince >= 14;
+  });
+
+  return (
+    <div className="cd-page">
+      <PageHead
+        eyebrow="overview"
+        title="Dashboard"
+        action={<Btn kind="primary" icon={Plus} onClick={() => setLogging(true)} disabled={projects.items.length === 0}>Log time</Btn>}
+      />
+
+      <div className="cd-stat-row">
+        <StatCard label="Active projects" value={activeProjects.length} onClick={() => goTo("projects")} />
+        <StatCard label="Unbilled hours" value={fmtHrs(unbilledHours)} onClick={() => goTo("time")} accent="amber" />
+        <StatCard label="Outstanding" value={outstandingLabel} onClick={() => goTo("billing")} accent="danger" small />
+        <StatCard label="Clients on file" value={clients.items.length} onClick={() => goTo("clients")} />
+      </div>
+
+      <div className="cd-grid-2">
+        <section className="cd-card">
+          <div className="cd-card-head">
+            <h3>This week's punch card</h3>
+            <span className="cd-muted-mono">{hoursByDay.reduce((a, b) => a + b, 0).toFixed(1)}h total</span>
+          </div>
+          <div className="cd-punchcard">
+            {days.map((iso, i) => (
+              <div className="cd-punch-col" key={iso}>
+                <div className="cd-punch-track">
+                  <div className="cd-punch-fill" style={{ height: `${(hoursByDay[i] / maxHrs) * 100}%` }} />
+                </div>
+                <div className="cd-punch-label">{new Date(iso + "T00:00:00").toLocaleDateString(undefined, { weekday: "narrow" })}</div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="cd-card">
+          <div className="cd-card-head"><h3>Upcoming meetings</h3></div>
+          {upcoming.length === 0 ? (
+            <Empty icon={CalendarDays} title="Nothing scheduled" hint="Add a meeting from the Schedule tab." />
+          ) : (
+            <ul className="cd-list">
+              {upcoming.map((m) => (
+                <li key={m.id} className="cd-list-row">
+                  <div>
+                    <div className="cd-list-title">{m.title}</div>
+                    <div className="cd-list-sub">{clientName(clients, m.clientId)}</div>
+                  </div>
+                  <div className="cd-list-meta">{fmtDate(m.date)} · {m.time}</div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      </div>
+
+      <div className="cd-grid-2">
+        <section className="cd-card">
+          <div className="cd-card-head"><h3>Recent time logged</h3></div>
+          {recentTime.length === 0 ? (
+            <Empty icon={Clock} title="No hours logged yet" hint="Log time against a project from the Time tab." />
+          ) : (
+            <ul className="cd-list">
+              {recentTime.map((t) => (
+                <li key={t.id} className="cd-list-row">
+                  <div>
+                    <div className="cd-list-title">{projectName(projects, t.projectId)}</div>
+                    <div className="cd-list-sub">{t.description || "—"}</div>
+                  </div>
+                  <div className="cd-list-meta mono">{fmtHrs(t.hours)} · {fmtDate(t.date)}</div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+
+        <section className="cd-card">
+          <div className="cd-card-head"><h3>Needs a check-in</h3></div>
+          {followUps.length === 0 ? (
+            <Empty icon={UserCheck} title="You're caught up" hint="No active client has gone quiet for 2+ weeks." />
+          ) : (
+            <ul className="cd-list">
+              {followUps.map((c) => (
+                <li key={c.id} className="cd-list-row">
+                  <div>
+                    <div className="cd-list-title">{c.company || c.name}</div>
+                    <div className="cd-list-sub">No update sent in 14+ days</div>
+                  </div>
+                  <Btn onClick={() => goTo("messages")}>Draft update</Btn>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      </div>
+
+      {logging && (
+        <Modal title="Log time" onClose={() => setLogging(false)}>
+          <TimeForm initial={null} projects={projects.items} onSave={(form) => { timeEntries.add(form); setLogging(false); }} />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function StatCard({ label, value, onClick, accent, small }) {
+  return (
+    <button className={"cd-stat" + (accent ? ` accent-${accent}` : "")} onClick={onClick}>
+      <div className={"cd-stat-value" + (small ? " small" : "")}>{value}</div>
+      <div className="cd-stat-label">{label}</div>
+    </button>
+  );
+}
+
+/* ------------------------------ Clients ------------------------------ */
+function ClientsView({ ctx }) {
+  const { clients, projects, timeEntries, clientNotes } = ctx;
+  const [editing, setEditing] = useState(null); // client object or "new"
+  const [notesFor, setNotesFor] = useState(null); // client object whose notes panel is open
+  const [query, setQuery] = useState("");
+
+  const filtered = clients.items.filter((c) =>
+    (c.name + " " + (c.company || "")).toLowerCase().includes(query.toLowerCase())
+  );
+
+  const save = (form) => {
+    if (form.id) clients.update(form.id, form);
+    else clients.add(form);
+    setEditing(null);
+  };
+
+  return (
+    <div className="cd-page">
+      <PageHead
+        eyebrow="relationships"
+        title="Clients"
+        action={<Btn kind="primary" icon={Plus} onClick={() => setEditing("new")}>New client</Btn>}
+      />
+
+      <div className="cd-searchbar">
+        <Search size={15} />
+        <input placeholder="Search clients…" value={query} onChange={(e) => setQuery(e.target.value)} />
+      </div>
+
+      {filtered.length === 0 ? (
+        <Empty icon={Users} title="No clients yet" hint="Add your first client to start tracking projects and hours." />
+      ) : (
+        <div className="cd-cardgrid">
+          {filtered.map((c) => {
+            const cProjects = projects.items.filter((p) => p.clientId === c.id);
+            const hrs = timeEntries.items.filter((t) => cProjects.some((p) => p.id === t.projectId)).reduce((s, t) => s + Number(t.hours || 0), 0);
+            return (
+              <div className="cd-card client-card" key={c.id}>
+                <div className="cd-card-head">
+                  <div>
+                    <h3>{c.company || c.name}</h3>
+                    {c.company && <div className="cd-list-sub">{c.name}</div>}
+                  </div>
+                  <div className="cd-row-actions">
+                    <button className="cd-iconbtn" onClick={() => setEditing(c)}><Pencil size={14} /></button>
+                    <button className="cd-iconbtn danger" onClick={() => { if (confirm(`Delete ${c.name}?`)) clients.remove(c.id); }}><Trash2 size={14} /></button>
+                  </div>
+                </div>
+                <div className="cd-kv"><span>Email</span><span>{c.email || "—"}</span></div>
+                <div className="cd-kv"><span>Phone</span><span>{c.phone || "—"}</span></div>
+                <div className="cd-kv"><span>Projects</span><span>{cProjects.length}</span></div>
+                <div className="cd-kv"><span>Hours logged</span><span className="mono">{fmtHrs(hrs)}</span></div>
+                {c.notes && <div className="cd-notes">{c.notes}</div>}
+                <div className="cd-form-actions" style={{ marginTop: 10 }}>
+                  <Btn icon={NotebookPen} onClick={() => setNotesFor(c)}>
+                    Notes {clientNotes.items.filter((n) => n.clientId === c.id).length > 0 ? `(${clientNotes.items.filter((n) => n.clientId === c.id).length})` : ""}
+                  </Btn>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {editing && (
+        <Modal title={editing === "new" ? "New client" : "Edit client"} onClose={() => setEditing(null)}>
+          <ClientForm initial={editing === "new" ? null : editing} onSave={save} />
+        </Modal>
+      )}
+
+      {notesFor && (
+        <Modal title={`Notes — ${notesFor.company || notesFor.name}`} onClose={() => setNotesFor(null)} wide>
+          <ClientNotesPanel client={notesFor} clientNotes={clientNotes} />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function ClientNotesPanel({ client, clientNotes }) {
+  const [date, setDate] = useState(todayISO());
+  const [content, setContent] = useState("");
+
+  const notes = clientNotes.items
+    .filter((n) => n.clientId === client.id)
+    .sort((a, b) => (b.date + b.createdAt).localeCompare(a.date + a.createdAt));
+
+  const addNote = (e) => {
+    e.preventDefault();
+    if (!content.trim()) return;
+    clientNotes.add({ clientId: client.id, date, content: content.trim() });
+    setContent("");
+  };
+
+  return (
+    <div className="cd-form">
+      <form onSubmit={addNote} className="cd-form">
+        <div className="cd-form-row">
+          <Field label="Date"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+        </div>
+        <Field label="Meeting / call notes">
+          <textarea rows={4} value={content} onChange={(e) => setContent(e.target.value)} placeholder="Decisions made, action items, concerns raised…" />
+        </Field>
+        <div className="cd-form-actions"><Btn kind="primary" type="submit" icon={Plus}>Add note</Btn></div>
+      </form>
+
+      <div className="cd-subhead" style={{ marginTop: 4 }}>History</div>
+      {notes.length === 0 ? (
+        <Empty icon={NotebookPen} title="No notes yet" hint="Log notes during or right after a client meeting." />
+      ) : (
+        <ul className="cd-list">
+          {notes.map((n) => (
+            <li className="cd-list-row" key={n.id} style={{ alignItems: "flex-start" }}>
+              <div>
+                <div className="cd-list-sub mono" style={{ marginBottom: 4 }}>{fmtDate(n.date)}</div>
+                <div style={{ fontSize: 13, whiteSpace: "pre-wrap" }}>{n.content}</div>
+              </div>
+              <button className="cd-iconbtn danger" onClick={() => clientNotes.remove(n.id)}><Trash2 size={14} /></button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function ClientForm({ initial, onSave }) {
+  const [form, setForm] = useState(initial || { name: "", company: "", email: "", phone: "", notes: "" });
+  const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+  return (
+    <form className="cd-form" onSubmit={(e) => { e.preventDefault(); onSave(form); }}>
+      <Field label="Contact name"><input required value={form.name} onChange={set("name")} placeholder="Jamie Reyes" /></Field>
+      <Field label="Company"><input value={form.company} onChange={set("company")} placeholder="Reyes Retail Co." /></Field>
+      <Field label="Email"><input type="email" value={form.email} onChange={set("email")} placeholder="jamie@company.com" /></Field>
+      <Field label="Phone"><input value={form.phone} onChange={set("phone")} placeholder="(555) 010-0192" /></Field>
+      <Field label="Notes"><textarea rows={3} value={form.notes} onChange={set("notes")} placeholder="How you met, preferences, context…" /></Field>
+      <div className="cd-form-actions"><Btn kind="primary" type="submit">Save client</Btn></div>
+    </form>
+  );
+}
+
+/* ------------------------------ Projects ------------------------------ */
+function ProjectsView({ ctx }) {
+  const { clients, projects, timeEntries, settings } = ctx;
+  const [editing, setEditing] = useState(null);
+  const [filter, setFilter] = useState("all");
+
+  const list = projects.items.filter((p) => filter === "all" || p.status === filter);
+
+  const save = (form) => {
+    if (form.id) projects.update(form.id, form);
+    else projects.add(form);
+    setEditing(null);
+  };
+
+  return (
+    <div className="cd-page">
+      <PageHead
+        eyebrow="engagements"
+        title="Projects"
+        action={<Btn kind="primary" icon={Plus} onClick={() => setEditing("new")} disabled={clients.items.length === 0}>New project</Btn>}
+      />
+
+      <div className="cd-tabs">
+        {["all", "active", "paused", "completed"].map((f) => (
+          <button key={f} className={"cd-tab" + (filter === f ? " active" : "")} onClick={() => setFilter(f)}>{f}</button>
+        ))}
+      </div>
+
+      {clients.items.length === 0 ? (
+        <Empty icon={FolderKanban} title="Add a client first" hint="Projects belong to a client — create one from the Clients tab." />
+      ) : list.length === 0 ? (
+        <Empty icon={FolderKanban} title="No projects here" hint="Create a project to start logging hours against it." />
+      ) : (
+        <div className="cd-cardgrid">
+          {list.map((p) => {
+            const hrs = timeEntries.items.filter((t) => t.projectId === p.id).reduce((s, t) => s + Number(t.hours || 0), 0);
+            const pct = p.budgetHours ? Math.min(100, (hrs / p.budgetHours) * 100) : null;
+            return (
+              <div className="cd-card" key={p.id}>
+                <div className="cd-card-head">
+                  <div>
+                    <h3>{p.name}</h3>
+                    <div className="cd-list-sub">{clientName(clients, p.clientId)}</div>
+                  </div>
+                  <div className="cd-row-actions">
+                    <Stamp status={p.status} />
+                    {p.isRetainer && <span className="cd-stamp" style={{ "--stamp-color": "var(--amber)" }}>retainer</span>}
+                    <button className="cd-iconbtn" onClick={() => setEditing(p)}><Pencil size={14} /></button>
+                    <button className="cd-iconbtn danger" onClick={() => { if (confirm(`Delete ${p.name}?`)) projects.remove(p.id); }}><Trash2 size={14} /></button>
+                  </div>
+                </div>
+                <div className="cd-kv"><span>Rate</span><span className="mono">{fmtMoney(p.hourlyRate, p.currency)}/hr</span></div>
+                <div className="cd-kv"><span>Hours logged</span><span className="mono">{fmtHrs(hrs)}{p.budgetHours ? ` / ${p.budgetHours}h` : ""}</span></div>
+                {p.isRetainer && (
+                  <div className="cd-kv"><span>Retainer</span><span className="mono">{fmtMoney(p.retainerAmount, p.currency)}/mo · day {p.retainerDay}</span></div>
+                )}
+                {pct !== null && (
+                  <div className="cd-bar"><div className="cd-bar-fill" style={{ width: `${pct}%` }} /></div>
+                )}
+                {p.notes && <div className="cd-notes">{p.notes}</div>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {editing && (
+        <Modal title={editing === "new" ? "New project" : "Edit project"} onClose={() => setEditing(null)}>
+          <ProjectForm initial={editing === "new" ? null : editing} clients={clients.items} defaultRate={settings.settings.defaultHourlyRate} defaultCurrency={settings.settings.defaultCurrency} onSave={save} />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function ProjectForm({ initial, clients, defaultRate, defaultCurrency, onSave }) {
+  const [form, setForm] = useState(initial || {
+    name: "", clientId: clients[0]?.id || "", status: "active", hourlyRate: defaultRate ?? 100, currency: defaultCurrency || "USD", budgetHours: "", notes: "",
+    isRetainer: false, retainerAmount: "", retainerDay: 1,
+  });
+  const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+  return (
+    <form className="cd-form" onSubmit={(e) => {
+      e.preventDefault();
+      onSave({
+        ...form,
+        hourlyRate: Number(form.hourlyRate) || 0,
+        budgetHours: form.budgetHours ? Number(form.budgetHours) : "",
+        retainerAmount: form.isRetainer ? Number(form.retainerAmount) || 0 : "",
+        retainerDay: form.isRetainer ? Number(form.retainerDay) || 1 : "",
+      });
+    }}>
+      <Field label="Project name"><input required value={form.name} onChange={set("name")} placeholder="iOS checkout redesign" /></Field>
+      <Field label="Client">
+        <select required value={form.clientId} onChange={set("clientId")}>
+          {clients.map((c) => <option key={c.id} value={c.id}>{c.company || c.name}</option>)}
+        </select>
+      </Field>
+      <div className="cd-form-row">
+        <Field label="Status">
+          <select value={form.status} onChange={set("status")}>
+            <option value="active">active</option>
+            <option value="paused">paused</option>
+            <option value="completed">completed</option>
+          </select>
+        </Field>
+        <Field label="Currency">
+          <select value={form.currency} onChange={set("currency")}>
+            {CURRENCY_CODES.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </Field>
+        <Field label="Hourly rate"><input type="number" min="0" step="1" value={form.hourlyRate} onChange={set("hourlyRate")} /></Field>
+      </div>
+      <Field label="Budget hours (optional)"><input type="number" min="0" step="0.5" value={form.budgetHours} onChange={set("budgetHours")} placeholder="e.g. 80" /></Field>
+      <Field label="Notes"><textarea rows={3} value={form.notes} onChange={set("notes")} placeholder="Scope, stack, links…" /></Field>
+
+      <div className="cd-subhead" style={{ marginTop: 6 }}>Retainer billing</div>
+      <label className="cd-checkbox-row">
+        <input type="checkbox" checked={!!form.isRetainer} onChange={(e) => setForm({ ...form, isRetainer: e.target.checked })} />
+        <span>Auto-generate a monthly retainer invoice for this project</span>
+      </label>
+      {form.isRetainer && (
+        <div className="cd-form-row">
+          <Field label={`Retainer amount (${form.currency})`}><input type="number" min="0" step="1" value={form.retainerAmount} onChange={set("retainerAmount")} /></Field>
+          <Field label="Bill on day of month"><input type="number" min="1" max="28" value={form.retainerDay} onChange={set("retainerDay")} /></Field>
+        </div>
+      )}
+
+      <div className="cd-form-actions"><Btn kind="primary" type="submit">Save project</Btn></div>
+    </form>
+  );
+}
+
+/* ------------------------------ Time ------------------------------ */
+function TimeView({ ctx }) {
+  const { clients, projects, timeEntries } = ctx;
+  const [editing, setEditing] = useState(null);
+  const [projectFilter, setProjectFilter] = useState("all");
+
+  const list = timeEntries.items
+    .filter((t) => projectFilter === "all" || t.projectId === projectFilter)
+    .sort((a, b) => b.date.localeCompare(a.date));
+
+  const save = (form) => {
+    if (form.id) timeEntries.update(form.id, form);
+    else timeEntries.add(form);
+    setEditing(null);
+  };
+
+  const lastEntry = [...timeEntries.items].sort((a, b) => (b.date + b.createdAt).localeCompare(a.date + a.createdAt))[0];
+  const repeatLast = () => {
+    if (!lastEntry) return;
+    timeEntries.add({ projectId: lastEntry.projectId, date: todayISO(), hours: lastEntry.hours, description: lastEntry.description, billed: false });
+  };
+
+  return (
+    <div className="cd-page">
+      <PageHead
+        eyebrow="hours"
+        title="Time tracking"
+        action={
+          <div className="cd-row-actions">
+            <Btn icon={Repeat} onClick={repeatLast} disabled={!lastEntry}>Repeat last entry</Btn>
+            <Btn kind="primary" icon={Plus} onClick={() => setEditing("new")} disabled={projects.items.length === 0}>Log time</Btn>
+          </div>
+        }
+      />
+
+      {projects.items.length === 0 ? (
+        <Empty icon={Clock} title="No projects to log against" hint="Create a project first, then log hours here." />
+      ) : (
+        <>
+          <TimerCard projects={projects.items} onLog={(entry) => timeEntries.add(entry)} />
+
+          <div className="cd-searchbar">
+            <select value={projectFilter} onChange={(e) => setProjectFilter(e.target.value)}>
+              <option value="all">All projects</option>
+              {projects.items.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </div>
+
+          {list.length === 0 ? (
+            <Empty icon={Clock} title="No hours logged" />
+          ) : (
+            <table className="cd-table">
+              <thead>
+                <tr><th>Date</th><th>Project</th><th>Client</th><th>Description</th><th>Hours</th><th>Billed</th><th /></tr>
+              </thead>
+              <tbody>
+                {list.map((t) => {
+                  const proj = projects.items.find((p) => p.id === t.projectId);
+                  return (
+                    <tr key={t.id}>
+                      <td className="mono">{fmtDate(t.date)}</td>
+                      <td>{proj?.name || "—"}</td>
+                      <td>{clientName(clients, proj?.clientId)}</td>
+                      <td className="cd-td-desc">{t.description || "—"}</td>
+                      <td className="mono">{fmtHrs(t.hours)}</td>
+                      <td>{t.billed ? <Stamp status="paid" /> : <Stamp status="draft" />}</td>
+                      <td>
+                        <div className="cd-row-actions">
+                          <button className="cd-iconbtn" onClick={() => setEditing(t)}><Pencil size={14} /></button>
+                          <button className="cd-iconbtn danger" onClick={() => timeEntries.remove(t.id)}><Trash2 size={14} /></button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </>
+      )}
+
+      {editing && (
+        <Modal title={editing === "new" ? "Log time" : "Edit time entry"} onClose={() => setEditing(null)}>
+          <TimeForm initial={editing === "new" ? null : editing} projects={projects.items} onSave={save} />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function TimerCard({ projects, onLog }) {
+  const timerHook = useTimer();
+  const [projectId, setProjectId] = useState(projects[0]?.id || "");
+  const [description, setDescription] = useState("");
+
+  if (!timerHook.ready) return null;
+
+  const fmtElapsed = (ms) => {
+    const totalSec = Math.floor(ms / 1000);
+    const h = String(Math.floor(totalSec / 3600)).padStart(2, "0");
+    const m = String(Math.floor((totalSec % 3600) / 60)).padStart(2, "0");
+    const s = String(totalSec % 60).padStart(2, "0");
+    return `${h}:${m}:${s}`;
+  };
+
+  const stop = () => {
+    const hours = Math.max(0.01, Math.round((timerHook.elapsedMs / 3600000) * 100) / 100);
+    onLog({ projectId: timerHook.timer.projectId, date: todayISO(), hours, description: timerHook.timer.description, billed: false });
+    timerHook.clear();
+  };
+
+  const activeProject = timerHook.timer ? projects.find((p) => p.id === timerHook.timer.projectId) : null;
+
+  return (
+    <section className="cd-card cd-timer-card">
+      <div className="cd-card-head"><h3>Timer</h3></div>
+      {timerHook.timer ? (
+        <div className="cd-timer-active">
+          <div className="cd-timer-clock mono">{fmtElapsed(timerHook.elapsedMs)}</div>
+          <div className="cd-timer-meta">{activeProject?.name || "—"}{timerHook.timer.description ? ` — ${timerHook.timer.description}` : ""}</div>
+          <Btn kind="primary" icon={Pause} onClick={stop}>Stop &amp; log</Btn>
+        </div>
+      ) : (
+        <div className="cd-timer-idle">
+          <select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
+            {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+          <input placeholder="What are you working on?" value={description} onChange={(e) => setDescription(e.target.value)} />
+          <Btn kind="primary" icon={Play} onClick={() => timerHook.start(projectId, description)} disabled={!projectId}>Start</Btn>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function TimeForm({ initial, projects, onSave }) {
+  const [form, setForm] = useState(initial || {
+    projectId: projects[0]?.id || "", date: todayISO(), hours: "", description: "", billed: false,
+  });
+  const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+  return (
+    <form className="cd-form" onSubmit={(e) => { e.preventDefault(); onSave({ ...form, hours: Number(form.hours) || 0 }); }}>
+      <Field label="Project">
+        <select required value={form.projectId} onChange={set("projectId")}>
+          {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
+      </Field>
+      <div className="cd-form-row">
+        <Field label="Date"><input type="date" required value={form.date} onChange={set("date")} /></Field>
+        <Field label="Hours"><input type="number" min="0" step="0.25" required value={form.hours} onChange={set("hours")} placeholder="2.5" /></Field>
+      </div>
+      <Field label="Description"><textarea rows={2} value={form.description} onChange={set("description")} placeholder="What did you work on?" /></Field>
+      <div className="cd-form-actions"><Btn kind="primary" type="submit">Save entry</Btn></div>
+    </form>
+  );
+}
+
+/* ------------------------------ Schedule ------------------------------ */
+function ScheduleView({ ctx }) {
+  const { clients, projects, meetings, timeEntries, clientNotes } = ctx;
+  const [editing, setEditing] = useState(null);
+  const [loggingFor, setLoggingFor] = useState(null); // meeting to log hours for
+  const [notingFor, setNotingFor] = useState(null); // meeting to add a note for
+
+  const upcoming = meetings.items.filter((m) => m.date >= todayISO()).sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+  const past = meetings.items.filter((m) => m.date < todayISO()).sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time));
+
+  const save = (form) => {
+    if (form.id) meetings.update(form.id, form);
+    else meetings.add(form);
+    setEditing(null);
+  };
+
+  const Row = (m) => {
+    const proj = projects.items.find((p) => p.id === m.projectId);
+    const isPast = m.date < todayISO();
+    const alreadyLogged = timeEntries.items.some((t) => t.meetingId === m.id);
+    const noteCount = clientNotes.items.filter((n) => n.meetingId === m.id).length;
+    return (
+      <li className="cd-list-row" key={m.id}>
+        <div>
+          <div className="cd-list-title">{m.title}</div>
+          <div className="cd-list-sub">{clientName(clients, m.clientId)}{proj ? ` · ${proj.name}` : ""}{m.notes ? ` — ${m.notes}` : ""}</div>
+        </div>
+        <div className="cd-row-actions">
+          <div className="cd-list-meta">{fmtDate(m.date)} · {m.time}</div>
+          {isPast && !alreadyLogged && (
+            <button className="cd-iconbtn" title="Log hours for this meeting" onClick={() => setLoggingFor(m)}><Clock size={14} /></button>
+          )}
+          <button className="cd-iconbtn" title="Add meeting notes" onClick={() => setNotingFor(m)}>
+            <NotebookPen size={14} />{noteCount > 0 ? ` ${noteCount}` : ""}
+          </button>
+          <button className="cd-iconbtn" onClick={() => setEditing(m)}><Pencil size={14} /></button>
+          <button className="cd-iconbtn danger" onClick={() => meetings.remove(m.id)}><Trash2 size={14} /></button>
+        </div>
+      </li>
+    );
+  };
+
+  return (
+    <div className="cd-page">
+      <PageHead
+        eyebrow="calendar"
+        title="Schedule"
+        action={<Btn kind="primary" icon={Plus} onClick={() => setEditing("new")} disabled={clients.items.length === 0}>New meeting</Btn>}
+      />
+
+      {clients.items.length === 0 ? (
+        <Empty icon={CalendarDays} title="Add a client first" hint="Meetings are linked to a client." />
+      ) : (
+        <>
+          <section className="cd-card">
+            <div className="cd-card-head"><h3>Upcoming</h3></div>
+            {upcoming.length === 0 ? <Empty icon={CalendarDays} title="Nothing on the books" /> : <ul className="cd-list">{upcoming.map(Row)}</ul>}
+          </section>
+          {past.length > 0 && (
+            <section className="cd-card">
+              <div className="cd-card-head"><h3>Past</h3></div>
+              <ul className="cd-list">{past.slice(0, 8).map(Row)}</ul>
+            </section>
+          )}
+        </>
+      )}
+
+      {editing && (
+        <Modal title={editing === "new" ? "New meeting" : "Edit meeting"} onClose={() => setEditing(null)}>
+          <MeetingForm initial={editing === "new" ? null : editing} clients={clients.items} projects={projects.items} onSave={save} />
+        </Modal>
+      )}
+
+      {loggingFor && (
+        <Modal title={`Log hours — ${loggingFor.title}`} onClose={() => setLoggingFor(null)}>
+          <TimeForm
+            initial={{
+              projectId: loggingFor.projectId || projects.items.find((p) => p.clientId === loggingFor.clientId)?.id || "",
+              date: loggingFor.date, hours: "", description: loggingFor.title, meetingId: loggingFor.id, billed: false,
+            }}
+            projects={projects.items.filter((p) => p.clientId === loggingFor.clientId)}
+            onSave={(form) => { timeEntries.add(form); setLoggingFor(null); }}
+          />
+        </Modal>
+      )}
+
+      {notingFor && (
+        <Modal title={`Notes — ${notingFor.title}`} onClose={() => setNotingFor(null)}>
+          <MeetingNoteForm meeting={notingFor} clientNotes={clientNotes} onDone={() => setNotingFor(null)} />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function MeetingNoteForm({ meeting, clientNotes, onDone }) {
+  const [content, setContent] = useState("");
+  const existing = clientNotes.items.filter((n) => n.meetingId === meeting.id).sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+
+  const submit = (e) => {
+    e.preventDefault();
+    if (!content.trim()) return;
+    clientNotes.add({ clientId: meeting.clientId, date: meeting.date, content: content.trim(), meetingId: meeting.id });
+    setContent("");
+    onDone();
+  };
+
+  return (
+    <div className="cd-form">
+      <form className="cd-form" onSubmit={submit}>
+        <Field label="Meeting notes">
+          <textarea rows={5} autoFocus value={content} onChange={(e) => setContent(e.target.value)} placeholder="Decisions, action items, concerns raised…" />
+        </Field>
+        <div className="cd-form-actions"><Btn kind="primary" type="submit" icon={Plus}>Save to client notes</Btn></div>
+      </form>
+      {existing.length > 0 && (
+        <>
+          <div className="cd-subhead">Already logged for this meeting</div>
+          <ul className="cd-list">
+            {existing.map((n) => (
+              <li className="cd-list-row" key={n.id}><div style={{ fontSize: 13, whiteSpace: "pre-wrap" }}>{n.content}</div></li>
+            ))}
+          </ul>
+        </>
+      )}
+    </div>
+  );
+}
+
+function MeetingForm({ initial, clients, projects, onSave }) {
+  const [form, setForm] = useState(initial || {
+    title: "", clientId: clients[0]?.id || "", projectId: "", date: todayISO(), time: "10:00", notes: "",
+  });
+  const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+  const clientProjects = projects.filter((p) => p.clientId === form.clientId);
+  return (
+    <form className="cd-form" onSubmit={(e) => { e.preventDefault(); onSave(form); }}>
+      <Field label="Title"><input required value={form.title} onChange={set("title")} placeholder="Sprint review call" /></Field>
+      <Field label="Client">
+        <select required value={form.clientId} onChange={(e) => setForm({ ...form, clientId: e.target.value, projectId: "" })}>
+          {clients.map((c) => <option key={c.id} value={c.id}>{c.company || c.name}</option>)}
+        </select>
+      </Field>
+      <Field label="Project (optional)">
+        <select value={form.projectId} onChange={set("projectId")}>
+          <option value="">—</option>
+          {clientProjects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
+      </Field>
+      <div className="cd-form-row">
+        <Field label="Date"><input type="date" required value={form.date} onChange={set("date")} /></Field>
+        <Field label="Time"><input type="time" required value={form.time} onChange={set("time")} /></Field>
+      </div>
+      <Field label="Notes"><textarea rows={2} value={form.notes} onChange={set("notes")} placeholder="Agenda, link, prep…" /></Field>
+      <div className="cd-form-actions"><Btn kind="primary" type="submit">Save meeting</Btn></div>
+    </form>
+  );
+}
+
+/* ------------------------------ Billing ------------------------------ */
+function invoiceTotal(inv) {
+  return (inv.lineItems || []).reduce((s, li) => s + Number(li.amount || 0), 0);
+}
+function nextInvoiceNumber(invoices, prefix) {
+  const nums = invoices.map((i) => parseInt((i.number || "").replace(/\D/g, ""), 10)).filter((n) => !isNaN(n));
+  const next = (nums.length ? Math.max(...nums) : 1000) + 1;
+  return `${prefix || "INV"}-${next}`;
+}
+
+function BillingView({ ctx }) {
+  const { clients, projects, timeEntries, invoices, settings } = ctx;
+  const [editing, setEditing] = useState(null); // "new" | invoice
+  const [viewing, setViewing] = useState(null); // invoice to view/print
+  const [filter, setFilter] = useState("all");
+
+  const list = invoices.items.filter((i) => filter === "all" || i.status === filter).sort((a, b) => b.date.localeCompare(a.date));
+
+  const save = (form) => {
+    if (form.id) {
+      invoices.update(form.id, form);
+    } else {
+      const withNum = { ...form, number: form.number || nextInvoiceNumber(invoices.items, settings.settings.invoicePrefix) };
+      invoices.add(withNum);
+      // mark the source time entries as billed
+      const billedIds = (form.lineItems || []).filter((li) => li.entryId).map((li) => li.entryId);
+      if (billedIds.length) {
+        timeEntries.setAll(timeEntries.items.map((t) => billedIds.includes(t.id) ? { ...t, billed: true } : t));
+      }
+    }
+    setEditing(null);
+  };
+
+  const setStatus = (inv, status) => invoices.update(inv.id, { status, paidDate: status === "paid" ? todayISO() : inv.paidDate });
+
+  return (
+    <div className="cd-page">
+      <PageHead
+        eyebrow="money"
+        title="Billing"
+        action={<Btn kind="primary" icon={Plus} onClick={() => setEditing("new")} disabled={clients.items.length === 0}>New invoice</Btn>}
+      />
+
+      <div className="cd-tabs">
+        {["all", "draft", "sent", "paid", "overdue"].map((f) => (
+          <button key={f} className={"cd-tab" + (filter === f ? " active" : "")} onClick={() => setFilter(f)}>{f}</button>
+        ))}
+      </div>
+
+      {invoices.items.length === 0 ? (
+        <Empty icon={Receipt} title="No invoices yet" hint="Generate one from logged, unbilled hours." />
+      ) : list.length === 0 ? (
+        <Empty icon={Receipt} title="Nothing here" />
+      ) : (
+        <table className="cd-table">
+          <thead><tr><th>Number</th><th>Client</th><th>Date</th><th>Due</th><th>Currency</th><th>Total</th><th>Status</th><th /></tr></thead>
+          <tbody>
+            {list.map((inv) => (
+              <tr key={inv.id}>
+                <td className="mono">{inv.number}</td>
+                <td>{clientName(clients, inv.clientId)}</td>
+                <td className="mono">{fmtDate(inv.date)}</td>
+                <td className="mono">{fmtDate(inv.dueDate)}</td>
+                <td className="mono">{inv.currency || "USD"}</td>
+                <td className="mono">{fmtMoney(invoiceTotal(inv), inv.currency)}</td>
+                <td><Stamp status={inv.status} /></td>
+                <td>
+                  <div className="cd-row-actions">
+                    <button className="cd-iconbtn" onClick={() => setViewing(inv)} title="View / statement"><FileText size={14} /></button>
+                    {inv.status === "draft" && <button className="cd-iconbtn" onClick={() => setStatus(inv, "sent")} title="Mark sent"><Send size={14} /></button>}
+                    {inv.status !== "paid" && <button className="cd-iconbtn" onClick={() => setStatus(inv, "paid")} title="Mark paid"><CircleCheck size={14} /></button>}
+                    <button className="cd-iconbtn danger" onClick={() => { if (confirm("Delete this invoice?")) invoices.remove(inv.id); }}><Trash2 size={14} /></button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {editing && (
+        <Modal title="New invoice" onClose={() => setEditing(null)} wide>
+          <InvoiceForm clients={clients.items} projects={projects.items} timeEntries={timeEntries.items} invoices={invoices.items} settings={settings.settings} onSave={save} />
+        </Modal>
+      )}
+
+      {viewing && (
+        <Modal title={viewing.number} onClose={() => setViewing(null)} wide>
+          <InvoiceDoc invoice={viewing} clients={clients.items} allInvoices={invoices.items} companyName={settings.settings.companyName} />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function InvoiceForm({ clients, projects, timeEntries, invoices, settings, onSave }) {
+  const [clientId, setClientId] = useState(clients[0]?.id || "");
+  const clientProjects = projects.filter((p) => p.clientId === clientId);
+  const clientCurrencies = [...new Set(clientProjects.map((p) => p.currency || "USD"))];
+  const [currency, setCurrency] = useState(clientCurrencies[0] || settings?.defaultCurrency || "USD");
+  const unbilled = timeEntries.filter((t) => !t.billed && clientProjects.some((p) => p.id === t.projectId && (p.currency || "USD") === currency));
+
+  const [selected, setSelected] = useState({}); // entryId -> bool
+  const [manualItems, setManualItems] = useState([]); // {desc, amount}
+  const [date, setDate] = useState(todayISO());
+  const [dueDate, setDueDate] = useState(() => {
+    const d = new Date(); d.setDate(d.getDate() + 14); return d.toISOString().slice(0, 10);
+  });
+
+  const lineItems = useMemo(() => {
+    const fromTime = unbilled.filter((t) => selected[t.id]).map((t) => {
+      const proj = projects.find((p) => p.id === t.projectId);
+      const rate = proj?.hourlyRate || 0;
+      return { entryId: t.id, desc: `${proj?.name || "Project"} — ${t.description || fmtDate(t.date)}`, hours: t.hours, rate, amount: rate * t.hours };
+    });
+    const fromManual = manualItems.filter((m) => m.desc && m.amount).map((m) => ({ desc: m.desc, amount: Number(m.amount) }));
+    return [...fromTime, ...fromManual];
+  }, [selected, manualItems, unbilled, projects]);
+
+  const total = lineItems.reduce((s, li) => s + Number(li.amount || 0), 0);
+
+  const addManual = () => setManualItems([...manualItems, { desc: "", amount: "" }]);
+  const updateManual = (i, patch) => setManualItems(manualItems.map((m, idx) => idx === i ? { ...m, ...patch } : m));
+  const removeManual = (i) => setManualItems(manualItems.filter((_, idx) => idx !== i));
+
+  return (
+    <form className="cd-form" onSubmit={(e) => {
+      e.preventDefault();
+      if (lineItems.length === 0) return;
+      onSave({ clientId, currency, date, dueDate, lineItems, status: "draft", number: nextInvoiceNumber(invoices, settings?.invoicePrefix) });
+    }}>
+      <div className="cd-form-row">
+        <Field label="Client">
+          <select value={clientId} onChange={(e) => {
+            setClientId(e.target.value);
+            setSelected({});
+            const newCur = [...new Set(projects.filter((p) => p.clientId === e.target.value).map((p) => p.currency || "USD"))];
+            setCurrency(newCur[0] || settings?.defaultCurrency || "USD");
+          }}>
+            {clients.map((c) => <option key={c.id} value={c.id}>{c.company || c.name}</option>)}
+          </select>
+        </Field>
+        <Field label="Currency">
+          <select value={currency} onChange={(e) => { setCurrency(e.target.value); setSelected({}); }}>
+            {CURRENCY_CODES.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </Field>
+      </div>
+      <div className="cd-form-row">
+        <Field label="Invoice date"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+        <Field label="Due date"><input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} /></Field>
+      </div>
+
+      <div className="cd-subhead">Unbilled hours ({currency})</div>
+      {unbilled.length === 0 ? (
+        <div className="cd-hint">No unbilled {currency} hours for this client — add manual line items below, or switch currency if their projects use a different one.</div>
+      ) : (
+        <ul className="cd-checklist">
+          {unbilled.map((t) => {
+            const proj = projects.find((p) => p.id === t.projectId);
+            const amount = (proj?.hourlyRate || 0) * t.hours;
+            return (
+              <li key={t.id}>
+                <label>
+                  <input type="checkbox" checked={!!selected[t.id]} onChange={(e) => setSelected({ ...selected, [t.id]: e.target.checked })} />
+                  <span>{proj?.name} — {t.description || fmtDate(t.date)}</span>
+                  <span className="mono">{fmtHrs(t.hours)} · {fmtMoney(amount, currency)}</span>
+                </label>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      <div className="cd-subhead">Manual line items</div>
+      {manualItems.map((m, i) => (
+        <div className="cd-form-row" key={i}>
+          <input placeholder="Description" value={m.desc} onChange={(e) => updateManual(i, { desc: e.target.value })} />
+          <input type="number" placeholder="Amount" style={{ maxWidth: 120 }} value={m.amount} onChange={(e) => updateManual(i, { amount: e.target.value })} />
+          <button type="button" className="cd-iconbtn danger" onClick={() => removeManual(i)}><Trash2 size={14} /></button>
+        </div>
+      ))}
+      <button type="button" className="cd-linkbtn" onClick={addManual}><Plus size={14} /> Add line item</button>
+
+      <div className="cd-invoice-total">Total: <span className="mono">{fmtMoney(total, currency)}</span></div>
+      <div className="cd-form-actions"><Btn kind="primary" type="submit" disabled={lineItems.length === 0}>Create draft invoice</Btn></div>
+    </form>
+  );
+}
+
+function InvoiceDoc({ invoice, clients, allInvoices, companyName }) {
+  const [copied, setCopied] = useState(false);
+  const client = clients.find((c) => c.id === invoice.clientId);
+  const cur = invoice.currency || "USD";
+  const total = invoiceTotal(invoice);
+  const isReceipt = invoice.status === "paid";
+
+  // client statement = all invoices for this client in the same currency
+  const statementInvoices = allInvoices.filter((i) => i.clientId === invoice.clientId && (i.currency || "USD") === cur).sort((a, b) => a.date.localeCompare(b.date));
+  const balanceDue = statementInvoices.filter((i) => i.status !== "paid").reduce((s, i) => s + invoiceTotal(i), 0);
+
+  const text = [
+    companyName || null, isReceipt ? "RECEIPT" : "INVOICE", invoice.number, "",
+    `Bill to: ${client?.company || client?.name || "—"}`,
+    client?.email ? `Email: ${client.email}` : null,
+    `Date: ${fmtDate(invoice.date)}`,
+    `Due: ${fmtDate(invoice.dueDate)}`,
+    isReceipt ? `Paid: ${fmtDate(invoice.paidDate)}` : null,
+    "", "Line items:",
+    ...invoice.lineItems.map((li) => `- ${li.desc}${li.hours ? ` (${fmtHrs(li.hours)} @ ${fmtMoney(li.rate, cur)})` : ""} — ${fmtMoney(li.amount, cur)}`),
+    "", `Total: ${fmtMoney(total, cur)} ${cur}`,
+  ].filter(Boolean).join("\n");
+
+  const copy = () => { navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500); };
+
+  return (
+    <div className="cd-doc">
+      <div className="cd-doc-head">
+        <div>
+          {companyName && <div className="cd-doc-company">{companyName}</div>}
+          <div className="cd-doc-kind">{isReceipt ? "Receipt" : "Invoice"} · {cur}</div>
+          <div className="cd-doc-number mono">{invoice.number}</div>
+        </div>
+        <Stamp status={invoice.status} />
+      </div>
+      <div className="cd-doc-grid">
+        <div><span>Bill to</span><strong>{client?.company || client?.name}</strong>{client?.email && <div className="cd-muted">{client.email}</div>}</div>
+        <div><span>Date</span><strong className="mono">{fmtDate(invoice.date)}</strong></div>
+        <div><span>Due</span><strong className="mono">{fmtDate(invoice.dueDate)}</strong></div>
+      </div>
+      <table className="cd-table">
+        <thead><tr><th>Description</th><th>Hours</th><th>Rate</th><th>Amount</th></tr></thead>
+        <tbody>
+          {invoice.lineItems.map((li, i) => (
+            <tr key={i}>
+              <td>{li.desc}</td>
+              <td className="mono">{li.hours ? fmtHrs(li.hours) : "—"}</td>
+              <td className="mono">{li.rate ? fmtMoney(li.rate, cur) : "—"}</td>
+              <td className="mono">{fmtMoney(li.amount, cur)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="cd-invoice-total">Total: <span className="mono">{fmtMoney(total, cur)}</span></div>
+
+      <div className="cd-subhead" style={{ marginTop: 20 }}>Client statement ({cur} invoices)</div>
+      <table className="cd-table">
+        <thead><tr><th>Number</th><th>Date</th><th>Status</th><th>Amount</th></tr></thead>
+        <tbody>
+          {statementInvoices.map((i) => (
+            <tr key={i.id}>
+              <td className="mono">{i.number}</td>
+              <td className="mono">{fmtDate(i.date)}</td>
+              <td><Stamp status={i.status} /></td>
+              <td className="mono">{fmtMoney(invoiceTotal(i), cur)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="cd-invoice-total">Balance due: <span className="mono">{fmtMoney(balanceDue, cur)}</span></div>
+
+      <div className="cd-form-actions">
+        <Btn icon={Printer} onClick={() => window.print()}>Print / Save as PDF</Btn>
+        <Btn kind="primary" icon={copied ? Check : Copy} onClick={copy}>{copied ? "Copied" : "Copy as text"}</Btn>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------ Messages ------------------------------ */
+function MessagesView({ ctx }) {
+  const { clients, projects, timeEntries, invoices, settings, comms } = ctx;
+  const companyName = settings.settings.companyName;
+  const [clientId, setClientId] = useState(clients.items[0]?.id || "");
+  const [kind, setKind] = useState("update"); // update | invoice
+  const [invoiceId, setInvoiceId] = useState("");
+  const [copied, setCopied] = useState(false);
+
+  const clientProjects = projects.items.filter((p) => p.clientId === clientId);
+  const recentEntries = timeEntries.items
+    .filter((t) => clientProjects.some((p) => p.id === t.projectId))
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .slice(0, 6);
+  const clientInvoices = invoices.items.filter((i) => i.clientId === clientId);
+  const client = clients.items.find((c) => c.id === clientId);
+
+  const updateDraft = useMemo(() => {
+    if (!client) return "";
+    const lines = clientProjects.map((p) => {
+      const hrs = timeEntries.items.filter((t) => t.projectId === p.id).reduce((s, t) => s + Number(t.hours || 0), 0);
+      return `• ${p.name} (${p.status}) — ${fmtHrs(hrs)} logged so far`;
+    });
+    const recentWork = recentEntries.map((t) => `  - ${fmtDate(t.date)}: ${t.description || "work session"} (${fmtHrs(t.hours)})`);
+    return [
+      `Subject: Project update — ${client.company || client.name}`, "",
+      `Hi ${client.name.split(" ")[0]},`, "",
+      "Quick update on where things stand:", "",
+      ...lines, "",
+      "Recent activity:",
+      ...recentWork, "",
+      "Let me know if you'd like to hop on a call to go deeper on any of this.", "",
+      "Best,", companyName,
+    ].join("\n");
+  }, [client, clientProjects, timeEntries.items, recentEntries, companyName]);
+
+  const invoiceDraft = useMemo(() => {
+    const inv = clientInvoices.find((i) => i.id === invoiceId);
+    if (!client || !inv) return "";
+    const cur = inv.currency || "USD";
+    return [
+      `Subject: Invoice ${inv.number} — ${fmtMoney(invoiceTotal(inv), cur)} due ${fmtDate(inv.dueDate)}`, "",
+      `Hi ${client.name.split(" ")[0]},`, "",
+      `Please find invoice ${inv.number} attached, totaling ${fmtMoney(invoiceTotal(inv), cur)}, due ${fmtDate(inv.dueDate)}.`, "",
+      "Summary:",
+      ...inv.lineItems.map((li) => `• ${li.desc} — ${fmtMoney(li.amount, cur)}`), "",
+      "Let me know if you have any questions.", "",
+      "Best,", companyName,
+    ].join("\n");
+  }, [client, clientInvoices, invoiceId, companyName]);
+
+  const draft = kind === "update" ? updateDraft : invoiceDraft;
+  const copy = () => {
+    navigator.clipboard.writeText(draft);
+    setCopied(true);
+    if (clientId && draft) comms.add({ clientId, kind, date: todayISO() });
+    setTimeout(() => setCopied(false), 1500);
+  };
+
+  return (
+    <div className="cd-page">
+      <PageHead eyebrow="communication" title="Messages" />
+
+      {clients.items.length === 0 ? (
+        <Empty icon={Mail} title="Add a client first" />
+      ) : (
+        <div className="cd-grid-2">
+          <section className="cd-card">
+            <div className="cd-card-head"><h3>Draft a message</h3></div>
+            <Field label="Client">
+              <select value={clientId} onChange={(e) => { setClientId(e.target.value); setInvoiceId(""); }}>
+                {clients.items.map((c) => <option key={c.id} value={c.id}>{c.company || c.name}</option>)}
+              </select>
+            </Field>
+            <Field label="Message type">
+              <select value={kind} onChange={(e) => setKind(e.target.value)}>
+                <option value="update">Project progress update</option>
+                <option value="invoice">Invoice notice</option>
+              </select>
+            </Field>
+            {kind === "invoice" && (
+              <Field label="Invoice">
+                <select value={invoiceId} onChange={(e) => setInvoiceId(e.target.value)}>
+                  <option value="">Select an invoice…</option>
+                  {clientInvoices.map((i) => <option key={i.id} value={i.id}>{i.number} — {fmtMoney(invoiceTotal(i), i.currency)}</option>)}
+                </select>
+              </Field>
+            )}
+            <div className="cd-hint" style={{ marginTop: 8 }}>
+              This drafts the message for you to send from your own email — copying it also logs a follow-up so the Dashboard knows this client's been contacted. To auto-send, connect an email tool — just ask and I can show you the option.
+            </div>
+          </section>
+
+          <section className="cd-card">
+            <div className="cd-card-head">
+              <h3>Preview</h3>
+              <Btn icon={copied ? Check : Copy} onClick={copy} disabled={!draft}>{copied ? "Copied" : "Copy"}</Btn>
+            </div>
+            <pre className="cd-draft">{draft || "Nothing to preview yet."}</pre>
+          </section>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------ Reports ------------------------------ */
+function ReportsView({ ctx }) {
+  const { clients, projects, timeEntries, invoices } = ctx;
+
+  const fmtByCurrency = (obj) => {
+    const keys = Object.keys(obj);
+    if (keys.length === 0) return "—";
+    return keys.map((cur) => fmtMoney(obj[cur], cur)).join(" · ");
+  };
+
+  const months = Array.from({ length: 6 }, (_, i) => {
+    const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - (5 - i));
+    return d.toISOString().slice(0, 7);
+  });
+
+  const monthlyRows = months.map((ym) => {
+    const hrs = timeEntries.items.filter((t) => t.date.startsWith(ym)).reduce((s, t) => s + Number(t.hours || 0), 0);
+    const invoicedByCur = {};
+    invoices.items.filter((i) => i.date.startsWith(ym)).forEach((i) => {
+      const cur = i.currency || "USD";
+      invoicedByCur[cur] = (invoicedByCur[cur] || 0) + invoiceTotal(i);
+    });
+    const paidByCur = {};
+    invoices.items.filter((i) => i.status === "paid" && (i.paidDate || "").startsWith(ym)).forEach((i) => {
+      const cur = i.currency || "USD";
+      paidByCur[cur] = (paidByCur[cur] || 0) + invoiceTotal(i);
+    });
+    return { ym, label: monthLabelShort(ym), hrs, invoicedByCur, paidByCur };
+  });
+  const maxHrs = Math.max(1, ...monthlyRows.map((r) => r.hrs));
+
+  // one row per client per currency they've been billed or worked in
+  const clientRows = [];
+  clients.items.forEach((c) => {
+    const cProjects = projects.items.filter((p) => p.clientId === c.id);
+    const currenciesUsed = [...new Set([
+      ...cProjects.map((p) => p.currency || "USD"),
+      ...invoices.items.filter((i) => i.clientId === c.id).map((i) => i.currency || "USD"),
+    ])];
+    currenciesUsed.forEach((cur) => {
+      const curProjectIds = cProjects.filter((p) => (p.currency || "USD") === cur).map((p) => p.id);
+      const hrs = timeEntries.items.filter((t) => curProjectIds.includes(t.projectId)).reduce((s, t) => s + Number(t.hours || 0), 0);
+      const earned = timeEntries.items.reduce((s, t) => {
+        const p = cProjects.find((p) => p.id === t.projectId && (p.currency || "USD") === cur);
+        return p ? s + Number(t.hours || 0) * Number(p.hourlyRate || 0) : s;
+      }, 0);
+      const invoiced = invoices.items.filter((i) => i.clientId === c.id && (i.currency || "USD") === cur).reduce((s, i) => s + invoiceTotal(i), 0);
+      const paid = invoices.items.filter((i) => i.clientId === c.id && (i.currency || "USD") === cur && i.status === "paid").reduce((s, i) => s + invoiceTotal(i), 0);
+      if (hrs > 0 || invoiced > 0) clientRows.push({ client: c, currency: cur, hrs, earned, invoiced, paid });
+    });
+  });
+  clientRows.sort((a, b) => b.invoiced - a.invoiced);
+
+  return (
+    <div className="cd-page">
+      <PageHead eyebrow="numbers" title="Reports" />
+
+      <section className="cd-card">
+        <div className="cd-card-head"><h3>Monthly summary</h3></div>
+        <div className="cd-punchcard" style={{ height: 90, marginBottom: 14 }}>
+          {monthlyRows.map((r) => (
+            <div className="cd-punch-col" key={r.ym}>
+              <div className="cd-punch-track">
+                <div className="cd-punch-fill" style={{ height: `${(r.hrs / maxHrs) * 100}%` }} />
+              </div>
+              <div className="cd-punch-label">{r.label.split(" ")[0]}</div>
+            </div>
+          ))}
+        </div>
+        <table className="cd-table">
+          <thead><tr><th>Month</th><th>Hours</th><th>Invoiced</th><th>Paid</th></tr></thead>
+          <tbody>
+            {monthlyRows.map((r) => (
+              <tr key={r.ym}>
+                <td>{r.label}</td>
+                <td className="mono">{fmtHrs(r.hrs)}</td>
+                <td className="mono">{fmtByCurrency(r.invoicedByCur)}</td>
+                <td className="mono">{fmtByCurrency(r.paidByCur)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+
+      <section className="cd-card">
+        <div className="cd-card-head"><h3>Per-client profitability</h3></div>
+        {clientRows.length === 0 ? (
+          <Empty icon={BarChart3} title="No activity yet" hint="Log hours and create invoices to see client profitability here." />
+        ) : (
+          <table className="cd-table">
+            <thead><tr><th>Client</th><th>Currency</th><th>Hours</th><th>Value of hours</th><th>Invoiced</th><th>Paid</th><th>Outstanding</th></tr></thead>
+            <tbody>
+              {clientRows.map((r) => (
+                <tr key={r.client.id + r.currency}>
+                  <td>{r.client.company || r.client.name}</td>
+                  <td className="mono">{r.currency}</td>
+                  <td className="mono">{fmtHrs(r.hrs)}</td>
+                  <td className="mono">{fmtMoney(r.earned, r.currency)}</td>
+                  <td className="mono">{fmtMoney(r.invoiced, r.currency)}</td>
+                  <td className="mono">{fmtMoney(r.paid, r.currency)}</td>
+                  <td className="mono">{fmtMoney(r.invoiced - r.paid, r.currency)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+    </div>
+  );
+}
+
+/* ------------------------------ Admin ------------------------------ */
+function AdminView({ ctx }) {
+  const { settings } = ctx;
+  const [form, setForm] = useState(settings.settings);
+  const [saved, setSaved] = useState(false);
+  const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+
+  const onSubmit = (e) => {
+    e.preventDefault();
+    settings.save({ ...form, defaultHourlyRate: Number(form.defaultHourlyRate) || 0 });
+    setSaved(true);
+    setTimeout(() => setSaved(false), 1500);
+  };
+
+  return (
+    <div className="cd-page">
+      <PageHead eyebrow="configuration" title="Admin" />
+
+      <section className="cd-card" style={{ maxWidth: 480 }}>
+        <div className="cd-card-head"><h3>Company details</h3></div>
+        <form className="cd-form" onSubmit={onSubmit}>
+          <Field label="Company name"><input value={form.companyName} onChange={set("companyName")} placeholder="Pronto Digital SA" /></Field>
+          <Field label="Company email"><input type="email" value={form.companyEmail} onChange={set("companyEmail")} placeholder="hello@prontodigital.com" /></Field>
+          <Field label="Company address"><textarea rows={2} value={form.companyAddress} onChange={set("companyAddress")} placeholder="Street, city, country" /></Field>
+
+          <div className="cd-subhead" style={{ marginTop: 6 }}>Billing defaults</div>
+          <div className="cd-form-row">
+            <Field label="Invoice number prefix"><input value={form.invoicePrefix} onChange={set("invoicePrefix")} placeholder="INV" /></Field>
+            <Field label="Default currency">
+              <select value={form.defaultCurrency} onChange={set("defaultCurrency")}>
+                {CURRENCY_CODES.map((c) => <option key={c} value={c}>{CURRENCIES[c].label}</option>)}
+              </select>
+            </Field>
+            <Field label="Default hourly rate"><input type="number" min="0" step="1" value={form.defaultHourlyRate} onChange={set("defaultHourlyRate")} /></Field>
+          </div>
+
+          <div className="cd-form-actions">
+            <Btn kind="primary" type="submit" icon={saved ? Check : undefined}>{saved ? "Saved" : "Save settings"}</Btn>
+          </div>
+        </form>
+      </section>
+
+      <div className="cd-hint" style={{ maxWidth: 480 }}>
+        These settings drive the company name shown in the sidebar and on invoices, receipts, and statements, plus the defaults used when creating new invoices and projects.
+      </div>
+    </div>
+  );
+}
+
+/* --------------------------------- CSS --------------------------------- */
+const CSS = `
+:root{
+  --bg:#F5F6F3; --surface:#FFFFFF; --surface-2:#EFEEE8;
+  --ink:#14171F; --ink-soft:#5B616E; --border:#E3E1DA;
+  --accent:#1E5F5A; --accent-soft:#DCEAE8;
+  --amber:#C6702B; --amber-soft:#F5E3D0;
+  --success:#2F7D4F; --success-soft:#DCEEDF;
+  --danger:#B23A3A; --danger-soft:#F6DEDD;
+  --petrol:#1B4B54;
+  --font-display:Calibri,Candara,'Segoe UI',Optima,Helvetica,Arial,sans-serif;
+  --font-body:Calibri,Candara,'Segoe UI',Optima,Helvetica,Arial,sans-serif;
+  --font-mono:'SF Mono','Menlo','Consolas',ui-monospace,monospace;
+}
+*{box-sizing:border-box;}
+.cd-root{display:flex;min-height:100vh;background:var(--bg);color:var(--ink);font-family:var(--font-body);}
+.cd-loading{padding:60px;font-family:var(--font-mono);color:var(--ink-soft);}
+
+.cd-sidebar{width:220px;flex-shrink:0;background:var(--ink);color:#E7E7E2;display:flex;flex-direction:column;padding:20px 14px;position:sticky;top:0;height:100vh;}
+.cd-brand{display:flex;align-items:center;gap:10px;padding:6px 8px 22px;}
+.cd-brand-mark{font-family:var(--font-mono);font-size:15px;color:var(--amber);background:rgba(198,112,43,0.18);border-radius:6px;padding:5px 7px;}
+.cd-brand-name{font-family:var(--font-display);font-size:16px;letter-spacing:0.2px;font-weight:700;color:#fff;}
+.cd-brand-sub{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:#8A8F9C;margin-top:1px;}
+.cd-nav{display:flex;flex-direction:column;gap:2px;flex:1;}
+.cd-nav-item{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:7px;background:none;border:none;border-left:2px solid transparent;color:#C6C9D2;font-size:13.5px;text-align:left;cursor:pointer;font-family:var(--font-body);}
+.cd-nav-item:hover{background:rgba(255,255,255,0.05);}
+.cd-nav-item.active{background:rgba(198,112,43,0.14);border-left-color:var(--amber);color:#fff;}
+.cd-sidebar-signout{display:flex;align-items:center;gap:8px;background:none;border:1px solid rgba(255,255,255,0.12);border-radius:8px;color:#C6C9D2;font-size:12px;padding:8px 10px;margin-top:10px;cursor:pointer;font-family:var(--font-body);}
+.cd-sidebar-signout:hover{background:rgba(255,255,255,0.06);color:#fff;}
+
+.cd-main{flex:1;padding:32px 40px 60px;max-width:1180px;}
+.cd-page{display:flex;flex-direction:column;gap:20px;}
+.cd-pagehead{display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:4px;}
+.cd-eyebrow{font-family:var(--font-mono);font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--amber);margin-bottom:4px;}
+.cd-pagehead h1{font-family:var(--font-display);font-size:28px;font-weight:700;margin:0;color:var(--petrol);}
+
+.cd-stat-row{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;}
+.cd-stat{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px 18px;text-align:left;cursor:pointer;font-family:var(--font-body);transition:border-color .15s;}
+.cd-stat:hover{border-color:var(--accent);}
+.cd-stat-value{font-family:var(--font-mono);font-size:22px;font-weight:600;}
+.cd-stat-value.small{font-size:15px;}
+.cd-stat-label{font-size:12px;color:var(--ink-soft);margin-top:2px;}
+.cd-stat.accent-amber .cd-stat-value{color:var(--amber);}
+.cd-stat.accent-danger .cd-stat-value{color:var(--danger);}
+
+.cd-grid-2{display:grid;grid-template-columns:1.3fr 1fr;gap:16px;}
+.cd-cardgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px;}
+.cd-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px 20px;}
+.cd-card-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:10px;}
+.cd-card-head h3{font-family:var(--font-display);font-size:16px;margin:0;font-weight:700;color:#000;}
+.cd-muted-mono{font-family:var(--font-mono);font-size:11px;color:var(--ink-soft);}
+.cd-muted{font-size:12px;color:var(--ink-soft);}
+
+.cd-punchcard{display:flex;gap:8px;align-items:flex-end;height:120px;padding-top:6px;}
+.cd-punch-col{flex:1;display:flex;flex-direction:column;align-items:center;height:100%;gap:6px;}
+.cd-punch-track{flex:1;width:100%;background:var(--surface-2);border-radius:5px;display:flex;align-items:flex-end;overflow:hidden;}
+.cd-punch-fill{width:100%;background:linear-gradient(180deg,var(--accent),#14403C);border-radius:5px;min-height:2px;}
+.cd-punch-label{font-family:var(--font-mono);font-size:10px;color:var(--ink-soft);}
+
+.cd-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px;}
+.cd-list-row{display:flex;justify-content:space-between;align-items:center;padding:9px 4px;border-bottom:1px solid var(--border);gap:12px;}
+.cd-list-row:last-child{border-bottom:none;}
+.cd-list-title{font-size:13.5px;font-weight:600;}
+.cd-list-sub{font-size:12px;color:var(--ink-soft);margin-top:1px;}
+.cd-list-meta{font-size:12px;color:var(--ink-soft);white-space:nowrap;}
+.cd-list-meta.mono{font-family:var(--font-mono);}
+
+.cd-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:36px 20px;color:var(--ink-soft);text-align:center;}
+.cd-empty-title{font-size:13.5px;font-weight:600;color:var(--ink);}
+.cd-empty-hint{font-size:12px;max-width:280px;}
+
+.cd-kv{display:flex;justify-content:space-between;font-size:12.5px;padding:4px 0;color:var(--ink-soft);}
+.cd-kv span:last-child{color:var(--ink);}
+.cd-notes{font-size:12px;color:var(--ink-soft);margin-top:8px;padding-top:8px;border-top:1px solid var(--border);}
+
+.cd-bar{height:5px;background:var(--surface-2);border-radius:4px;overflow:hidden;margin-top:6px;}
+.cd-bar-fill{height:100%;background:var(--accent);}
+
+.cd-row-actions{display:flex;align-items:center;gap:6px;}
+.cd-iconbtn{width:28px;height:28px;border-radius:7px;border:1px solid var(--border);background:var(--surface);color:var(--ink-soft);display:flex;align-items:center;justify-content:center;cursor:pointer;}
+.cd-iconbtn:hover{background:var(--surface-2);color:var(--ink);}
+.cd-iconbtn.danger:hover{background:var(--danger-soft);color:var(--danger);border-color:var(--danger);}
+
+.cd-stamp{font-family:var(--font-mono);font-size:10px;letter-spacing:1.2px;text-transform:uppercase;color:var(--stamp-color);border:1.5px solid var(--stamp-color);border-radius:4px;padding:3px 7px;display:inline-block;transform:rotate(-1.5deg);font-weight:600;}
+
+.cd-searchbar{display:flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--border);border-radius:9px;padding:8px 12px;color:var(--ink-soft);max-width:340px;}
+.cd-searchbar input,.cd-searchbar select{border:none;outline:none;background:none;font-size:13px;width:100%;color:var(--ink);font-family:var(--font-body);}
+.cd-searchbar select{width:auto;min-width:180px;}
+
+.cd-tabs{display:flex;gap:4px;border-bottom:1px solid var(--border);}
+.cd-tab{background:none;border:none;padding:8px 14px;font-size:12.5px;text-transform:capitalize;color:var(--ink-soft);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;font-family:var(--font-body);}
+.cd-tab.active{color:var(--ink);border-bottom-color:var(--amber);font-weight:600;}
+
+.cd-table{width:100%;border-collapse:collapse;background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;}
+.cd-table th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:0.6px;color:var(--ink-soft);background:var(--surface-2);padding:9px 12px;font-weight:600;}
+.cd-table td{padding:10px 12px;font-size:13px;border-top:1px solid var(--border);vertical-align:middle;}
+.cd-td-desc{max-width:220px;color:var(--ink-soft);}
+.mono{font-family:var(--font-mono);}
+
+.cd-btn{display:inline-flex;align-items:center;gap:6px;border-radius:8px;border:1px solid var(--border);background:var(--surface);color:var(--ink);font-size:13px;padding:8px 14px;cursor:pointer;font-family:var(--font-body);font-weight:500;}
+.cd-btn:hover{background:var(--surface-2);}
+.cd-btn.primary{background:var(--ink);color:#fff;border-color:var(--ink);}
+.cd-btn.primary:hover{background:#262A35;}
+.cd-btn:disabled{opacity:0.45;cursor:not-allowed;}
+.cd-linkbtn{display:inline-flex;align-items:center;gap:4px;background:none;border:none;color:var(--accent);font-size:12.5px;cursor:pointer;padding:4px 0;font-family:var(--font-body);font-weight:600;}
+
+.cd-modal-backdrop{position:fixed;inset:0;background:rgba(20,23,31,0.45);display:flex;align-items:center;justify-content:center;z-index:50;padding:20px;}
+.cd-modal{background:var(--surface);border-radius:14px;width:420px;max-width:100%;max-height:88vh;overflow:auto;box-shadow:0 20px 60px rgba(0,0,0,0.25);}
+.cd-modal.wide{width:620px;}
+.cd-modal-head{display:flex;justify-content:space-between;align-items:center;padding:16px 20px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--surface);}
+.cd-modal-head h3{font-family:var(--font-display);font-size:16px;margin:0;font-weight:700;color:#000;}
+.cd-modal-body{padding:20px;}
+
+.cd-form{display:flex;flex-direction:column;gap:13px;}
+.cd-form-row{display:flex;gap:10px;}
+.cd-form-row>*{flex:1;}
+.cd-field{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--ink-soft);font-weight:600;}
+.cd-field input,.cd-field select,.cd-field textarea{font-family:var(--font-body);font-size:13.5px;color:var(--ink);border:1px solid var(--border);border-radius:8px;padding:8px 10px;background:var(--bg);outline:none;}
+.cd-field input:focus,.cd-field select:focus,.cd-field textarea:focus{border-color:var(--accent);}
+.cd-form-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:4px;}
+
+.cd-subhead{font-size:11px;text-transform:uppercase;letter-spacing:0.8px;color:var(--ink-soft);font-weight:700;margin-top:6px;}
+.cd-hint{font-size:12.5px;color:var(--ink-soft);background:var(--surface-2);border-radius:8px;padding:10px 12px;}
+.cd-checklist{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px;max-height:160px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:6px;}
+.cd-checklist label{display:flex;align-items:center;gap:8px;font-size:12.5px;padding:5px 4px;}
+.cd-checklist label span:nth-child(2){flex:1;}
+.cd-invoice-total{font-size:15px;font-weight:700;text-align:right;padding-top:6px;}
+
+.cd-doc{display:flex;flex-direction:column;gap:14px;}
+.cd-doc-head{display:flex;justify-content:space-between;align-items:flex-start;}
+.cd-doc-company{font-family:var(--font-display);font-size:18px;font-weight:700;color:var(--petrol);margin-bottom:4px;}
+.cd-doc-kind{font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:1.4px;color:var(--ink-soft);}
+.cd-doc-number{font-size:19px;font-weight:700;color:#000;}
+.cd-doc-grid{display:grid;grid-template-columns:1.4fr 1fr 1fr;gap:14px;font-size:12.5px;padding:14px;background:var(--surface-2);border-radius:9px;}
+.cd-doc-grid span{display:block;color:var(--ink-soft);font-size:10.5px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px;}
+.cd-draft{white-space:pre-wrap;font-family:var(--font-mono);font-size:12.5px;line-height:1.6;background:var(--bg);border:1px solid var(--border);border-radius:9px;padding:14px;min-height:220px;}
+
+.cd-checkbox-row{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink);}
+.cd-checkbox-row input{width:auto;}
+
+.cd-timer-card{border-color:var(--accent);}
+.cd-timer-idle{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+.cd-timer-idle select,.cd-timer-idle input{font-family:var(--font-body);font-size:13.5px;border:1px solid var(--border);border-radius:8px;padding:8px 10px;background:var(--bg);}
+.cd-timer-idle input{flex:1;min-width:180px;}
+.cd-timer-active{display:flex;align-items:center;gap:16px;flex-wrap:wrap;}
+.cd-timer-clock{font-size:26px;font-weight:700;color:var(--accent);letter-spacing:1px;}
+.cd-timer-meta{flex:1;font-size:13px;color:var(--ink-soft);min-width:140px;}
+
+@media print{
+  body *{visibility:hidden;}
+  .cd-doc,.cd-doc *{visibility:visible;}
+  .cd-doc{position:absolute;left:0;top:0;width:100%;padding:20px;}
+  .cd-doc .cd-form-actions{display:none;}
+}
+
+@media (max-width: 860px){
+  .cd-root{flex-direction:column;}
+  .cd-sidebar{width:100%;height:auto;flex-direction:row;overflow-x:auto;position:relative;}
+  .cd-nav{flex-direction:row;}
+  .cd-main{padding:20px;}
+  .cd-grid-2{grid-template-columns:1fr;}
+  .cd-stat-row{grid-template-columns:repeat(2,1fr);}
+}
+`;
+
+/* ------------------------------ auth gate ------------------------------ */
+function Root() {
+  const { session, ready } = useAuth();
+
+  if (!ready) {
+    return (
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "Calibri, sans-serif", color: "#5B616E" }}>
+        loading…
+      </div>
+    );
+  }
+
+  if (!session) return <LoginScreen />;
+
+  return <App />;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(Root));
+</script>
+</body>
+</html>
