@@ -304,11 +304,6 @@ const fmtDate = (iso) => {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 };
 const fmtHrs = (n) => `${(Number(n) || 0).toFixed(2)}h`;
-async function sendViaEmail(to, subject, text) {
-  const { data, error } = await sb.functions.invoke("send-email", { body: { to, subject, text } });
-  if (error) throw error;
-  return data;
-}
 const monthLabel = (ym) => new Date(ym + "-01T00:00:00").toLocaleDateString(undefined, { month: "long", year: "numeric" });
 const monthLabelShort = (ym) => new Date(ym + "-01T00:00:00").toLocaleDateString(undefined, { month: "short", year: "numeric" });
 
@@ -1445,7 +1440,6 @@ function InvoiceForm({ clients, projects, timeEntries, invoices, settings, onSav
 
 function InvoiceDoc({ invoice, clients, allInvoices, companyName }) {
   const [copied, setCopied] = useState(false);
-  const [sendState, setSendState] = useState("idle"); // idle | sending | sent | error
   const client = clients.find((c) => c.id === invoice.clientId);
   const cur = invoice.currency || "USD";
   const total = invoiceTotal(invoice);
@@ -1466,20 +1460,6 @@ function InvoiceDoc({ invoice, clients, allInvoices, companyName }) {
     ...invoice.lineItems.map((li) => `- ${li.desc}${li.hours ? ` (${fmtHrs(li.hours)} @ ${fmtMoney(li.rate, cur)})` : ""} — ${fmtMoney(li.amount, cur)}`),
     "", `Total: ${fmtMoney(total, cur)} ${cur}`,
   ].filter(Boolean).join("\n");
-
-  const sendEmail = async () => {
-    if (!client?.email) { alert("This client has no email address on file — add one from the Clients tab first."); return; }
-    setSendState("sending");
-    try {
-      await sendViaEmail(client.email, `${isReceipt ? "Receipt" : "Invoice"} ${invoice.number} from ${companyName || "us"}`, text);
-      setSendState("sent");
-      setTimeout(() => setSendState("idle"), 2500);
-    } catch (e) {
-      console.error(e);
-      setSendState("error");
-      setTimeout(() => setSendState("idle"), 3000);
-    }
-  };
 
   const copy = () => { navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500); };
 
@@ -1532,14 +1512,6 @@ function InvoiceDoc({ invoice, clients, allInvoices, companyName }) {
       <div className="cd-form-actions">
         <Btn icon={Printer} onClick={() => window.print()}>Print / Save as PDF</Btn>
         <Btn kind="primary" icon={copied ? Check : Copy} onClick={copy}>{copied ? "Copied" : "Copy as text"}</Btn>
-        <Btn
-          kind="primary"
-          icon={sendState === "sent" ? Check : Mail}
-          onClick={sendEmail}
-          disabled={sendState === "sending"}
-        >
-          {sendState === "sending" ? "Sending…" : sendState === "sent" ? "Sent" : sendState === "error" ? "Failed — retry" : "Email to client"}
-        </Btn>
       </div>
     </div>
   );
@@ -1597,31 +1569,11 @@ function MessagesView({ ctx }) {
   }, [client, clientInvoices, invoiceId, companyName]);
 
   const draft = kind === "update" ? updateDraft : invoiceDraft;
-  const [sendState, setSendState] = useState("idle"); // idle | sending | sent | error
   const copy = () => {
     navigator.clipboard.writeText(draft);
     setCopied(true);
     if (clientId && draft) comms.add({ clientId, kind, date: todayISO() });
     setTimeout(() => setCopied(false), 1500);
-  };
-
-  const sendDraft = async () => {
-    if (!client?.email) { alert("This client has no email address on file — add one from the Clients tab first."); return; }
-    if (!draft) return;
-    const lines = draft.split("\n");
-    const subject = lines[0].replace(/^Subject:\s*/, "");
-    const body = lines.slice(1).join("\n").replace(/^\n+/, "");
-    setSendState("sending");
-    try {
-      await sendViaEmail(client.email, subject, body);
-      setSendState("sent");
-      comms.add({ clientId, kind, date: todayISO() });
-      setTimeout(() => setSendState("idle"), 2500);
-    } catch (e) {
-      console.error(e);
-      setSendState("error");
-      setTimeout(() => setSendState("idle"), 3000);
-    }
   };
 
   return (
@@ -1654,24 +1606,14 @@ function MessagesView({ ctx }) {
               </Field>
             )}
             <div className="cd-hint" style={{ marginTop: 8 }}>
-              "Send email" sends this straight to the client's inbox and logs a follow-up on the Dashboard. "Copy" is there if you'd rather paste it into your own email client instead.
+              This drafts the message for you — copying it also logs a follow-up so the Dashboard knows this client's been contacted. To actually send it, paste it into your own email, or ask Claude in chat to draft it straight into your connected Gmail account.
             </div>
           </section>
 
           <section className="cd-card">
             <div className="cd-card-head">
               <h3>Preview</h3>
-              <div className="cd-row-actions">
-                <Btn icon={copied ? Check : Copy} onClick={copy} disabled={!draft}>{copied ? "Copied" : "Copy"}</Btn>
-                <Btn
-                  kind="primary"
-                  icon={sendState === "sent" ? Check : Send}
-                  onClick={sendDraft}
-                  disabled={!draft || sendState === "sending"}
-                >
-                  {sendState === "sending" ? "Sending…" : sendState === "sent" ? "Sent" : sendState === "error" ? "Failed — retry" : "Send email"}
-                </Btn>
-              </div>
+              <Btn icon={copied ? Check : Copy} onClick={copy} disabled={!draft}>{copied ? "Copied" : "Copy"}</Btn>
             </div>
             <pre className="cd-draft">{draft || "Nothing to preview yet."}</pre>
           </section>
