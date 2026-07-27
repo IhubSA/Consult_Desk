@@ -26,7 +26,7 @@ const DollarSign = mkIcon("$"); const Play = mkIcon("▶"); const Pause = mkIcon
 const FileText = mkIcon("📄"); const Send = mkIcon("➤"); const CircleCheck = mkIcon("✔");
 const AlertCircle = mkIcon("!"); const Settings = mkIcon("⚙"); const NotebookPen = mkIcon("📝");
 const Printer = mkIcon("🖶"); const BarChart3 = mkIcon("📊"); const Repeat = mkIcon("↻");
-const UserCheck = mkIcon("🙋"); const LogOut = mkIcon("⎋");
+const UserCheck = mkIcon("🙋"); const LogOut = mkIcon("⎋"); const BookOpen = mkIcon("📖");
 
 /* ---- Supabase client (loaded from CDN as window.supabase) ---- */
 const SUPABASE_URL = "https://ziladpnlfajtiboavwvn.supabase.co";
@@ -149,6 +149,13 @@ const DEFAULT_SETTINGS = {
   invoicePrefix: "INV",
   defaultHourlyRate: 100,
   defaultCurrency: "USD",
+  bankName: "",
+  bankAccountName: "",
+  bankAccountNumber: "",
+  bankBranchCode: "",
+  vatNumber: "",
+  defaultTaxRate: 0,
+  paymentTerms: "Payment due within 14 days of invoice date.",
 };
 
 function useSupabaseSettings() {
@@ -160,7 +167,11 @@ function useSupabaseSettings() {
     (async () => {
       const { data, error } = await sb.from("settings").select("*").eq("id", 1).single();
       if (cancelled) return;
-      if (!error && data) setSettings({ ...DEFAULT_SETTINGS, ...keysFromDb(data) });
+      if (!error && data) {
+        const fromDb = keysFromDb(data);
+        const nonNull = Object.fromEntries(Object.entries(fromDb).filter(([, v]) => v !== null));
+        setSettings({ ...DEFAULT_SETTINGS, ...nonNull });
+      }
       setReady(true);
     })();
     return () => { cancelled = true; };
@@ -322,6 +333,7 @@ const NAV = [
   { key: "billing", label: "Billing", icon: Receipt },
   { key: "messages", label: "Messages", icon: Mail },
   { key: "reports", label: "Reports", icon: BarChart3 },
+  { key: "ledger", label: "Ledger", icon: BookOpen },
   { key: "admin", label: "Admin", icon: Settings },
 ];
 
@@ -335,10 +347,11 @@ function App() {
   const invoices = useCollection("invoices");
   const clientNotes = useCollection("client_notes");
   const comms = useCollection("comms");
+  const expenses = useCollection("expenses");
   const settingsHook = useSettings();
 
-  const ctx = { clients, projects, timeEntries, meetings, invoices, clientNotes, comms, settings: settingsHook };
-  const loading = !clients.ready || !projects.ready || !timeEntries.ready || !meetings.ready || !invoices.ready || !clientNotes.ready || !comms.ready || !settingsHook.ready;
+  const ctx = { clients, projects, timeEntries, meetings, invoices, clientNotes, comms, expenses, settings: settingsHook };
+  const loading = !clients.ready || !projects.ready || !timeEntries.ready || !meetings.ready || !invoices.ready || !clientNotes.ready || !comms.ready || !expenses.ready || !settingsHook.ready;
 
   // Automations: run once per session after data loads — flip overdue invoices,
   // and generate draft retainer invoices for active retainer projects that are due.
@@ -423,6 +436,7 @@ function App() {
             {tab === "billing" && <BillingView ctx={ctx} />}
             {tab === "messages" && <MessagesView ctx={ctx} />}
             {tab === "reports" && <ReportsView ctx={ctx} />}
+            {tab === "ledger" && <LedgerView ctx={ctx} />}
             {tab === "admin" && <AdminView ctx={ctx} />}
           </>
         )}
@@ -1249,8 +1263,14 @@ function MeetingForm({ initial, clients, projects, onSave }) {
 }
 
 /* ------------------------------ Billing ------------------------------ */
-function invoiceTotal(inv) {
+function invoiceSubtotal(inv) {
   return (inv.lineItems || []).reduce((s, li) => s + Number(li.amount || 0), 0);
+}
+function invoiceTax(inv) {
+  return invoiceSubtotal(inv) * (Number(inv.taxRate || 0) / 100);
+}
+function invoiceTotal(inv) {
+  return invoiceSubtotal(inv) + invoiceTax(inv);
 }
 function nextInvoiceNumber(invoices, prefix) {
   const nums = invoices.map((i) => parseInt((i.number || "").replace(/\D/g, ""), 10)).filter((n) => !isNaN(n));
@@ -1281,7 +1301,15 @@ function BillingView({ ctx }) {
     setEditing(null);
   };
 
-  const setStatus = (inv, status) => invoices.update(inv.id, { status, paidDate: status === "paid" ? todayISO() : inv.paidDate });
+  const setStatus = (inv, status) => {
+    if (status === "paid") {
+      const method = window.prompt("How was this paid? (e.g. Bank Transfer, Cash, Card)", inv.paymentMethod || "Bank Transfer");
+      if (method === null) return; // cancelled
+      invoices.update(inv.id, { status, paidDate: todayISO(), paymentMethod: method || "Bank Transfer" });
+    } else {
+      invoices.update(inv.id, { status });
+    }
+  };
 
   return (
     <div className="cd-page">
@@ -1336,7 +1364,7 @@ function BillingView({ ctx }) {
 
       {viewing && (
         <Modal title={viewing.number} onClose={() => setViewing(null)} wide>
-          <InvoiceDoc invoice={viewing} clients={clients.items} allInvoices={invoices.items} companyName={settings.settings.companyName} />
+          <InvoiceDoc invoice={viewing} clients={clients.items} allInvoices={invoices.items} companyName={settings.settings.companyName} settings={settings.settings} />
         </Modal>
       )}
     </div>
@@ -1356,6 +1384,7 @@ function InvoiceForm({ clients, projects, timeEntries, invoices, settings, onSav
   const [dueDate, setDueDate] = useState(() => {
     const d = new Date(); d.setDate(d.getDate() + 14); return d.toISOString().slice(0, 10);
   });
+  const [taxRate, setTaxRate] = useState(settings?.defaultTaxRate || 0);
 
   const lineItems = useMemo(() => {
     const fromTime = unbilled.filter((t) => selected[t.id]).map((t) => {
@@ -1367,7 +1396,9 @@ function InvoiceForm({ clients, projects, timeEntries, invoices, settings, onSav
     return [...fromTime, ...fromManual];
   }, [selected, manualItems, unbilled, projects]);
 
-  const total = lineItems.reduce((s, li) => s + Number(li.amount || 0), 0);
+  const subtotal = lineItems.reduce((s, li) => s + Number(li.amount || 0), 0);
+  const taxAmount = subtotal * (Number(taxRate || 0) / 100);
+  const total = subtotal + taxAmount;
 
   const addManual = () => setManualItems([...manualItems, { desc: "", amount: "" }]);
   const updateManual = (i, patch) => setManualItems(manualItems.map((m, idx) => idx === i ? { ...m, ...patch } : m));
@@ -1377,7 +1408,7 @@ function InvoiceForm({ clients, projects, timeEntries, invoices, settings, onSav
     <form className="cd-form" onSubmit={(e) => {
       e.preventDefault();
       if (lineItems.length === 0) return;
-      onSave({ clientId, currency, date, dueDate, lineItems, status: "draft", number: nextInvoiceNumber(invoices, settings?.invoicePrefix) });
+      onSave({ clientId, currency, date, dueDate, lineItems, taxRate: Number(taxRate) || 0, status: "draft", number: nextInvoiceNumber(invoices, settings?.invoicePrefix) });
     }}>
       <div className="cd-form-row">
         <Field label="Client">
@@ -1432,33 +1463,53 @@ function InvoiceForm({ clients, projects, timeEntries, invoices, settings, onSav
       ))}
       <button type="button" className="cd-linkbtn" onClick={addManual}><Plus size={14} /> Add line item</button>
 
+      <Field label="Tax / VAT rate (%)"><input type="number" min="0" step="0.1" value={taxRate} onChange={(e) => setTaxRate(e.target.value)} placeholder="e.g. 15" /></Field>
+
+      <div className="cd-invoice-total" style={{ fontSize: 13, fontWeight: 400 }}>Subtotal: <span className="mono">{fmtMoney(subtotal, currency)}</span></div>
+      {taxAmount > 0 && <div className="cd-invoice-total" style={{ fontSize: 13, fontWeight: 400 }}>Tax ({taxRate}%): <span className="mono">{fmtMoney(taxAmount, currency)}</span></div>}
       <div className="cd-invoice-total">Total: <span className="mono">{fmtMoney(total, currency)}</span></div>
       <div className="cd-form-actions"><Btn kind="primary" type="submit" disabled={lineItems.length === 0}>Create draft invoice</Btn></div>
     </form>
   );
 }
 
-function InvoiceDoc({ invoice, clients, allInvoices, companyName }) {
+function InvoiceDoc({ invoice, clients, allInvoices, companyName, settings }) {
   const [copied, setCopied] = useState(false);
   const client = clients.find((c) => c.id === invoice.clientId);
   const cur = invoice.currency || "USD";
+  const subtotal = invoiceSubtotal(invoice);
+  const tax = invoiceTax(invoice);
   const total = invoiceTotal(invoice);
   const isReceipt = invoice.status === "paid";
+  const receiptNumber = "RCT-" + (invoice.number || "").replace(/\D/g, "");
 
   // client statement = all invoices for this client in the same currency
   const statementInvoices = allInvoices.filter((i) => i.clientId === invoice.clientId && (i.currency || "USD") === cur).sort((a, b) => a.date.localeCompare(b.date));
   const balanceDue = statementInvoices.filter((i) => i.status !== "paid").reduce((s, i) => s + invoiceTotal(i), 0);
 
+  const hasBankDetails = settings?.bankName || settings?.bankAccountNumber;
+
   const text = [
-    companyName || null, isReceipt ? "RECEIPT" : "INVOICE", invoice.number, "",
+    companyName || null,
+    settings?.companyAddress || null,
+    settings?.vatNumber ? `VAT No: ${settings.vatNumber}` : null,
+    "",
+    isReceipt ? "RECEIPT" : "INVOICE",
+    isReceipt ? `Receipt No: ${receiptNumber}  (Invoice: ${invoice.number})` : `Invoice No: ${invoice.number}`,
+    "",
     `Bill to: ${client?.company || client?.name || "—"}`,
     client?.email ? `Email: ${client.email}` : null,
     `Date: ${fmtDate(invoice.date)}`,
     `Due: ${fmtDate(invoice.dueDate)}`,
-    isReceipt ? `Paid: ${fmtDate(invoice.paidDate)}` : null,
+    isReceipt ? `Paid: ${fmtDate(invoice.paidDate)}${invoice.paymentMethod ? ` via ${invoice.paymentMethod}` : ""}` : null,
     "", "Line items:",
     ...invoice.lineItems.map((li) => `- ${li.desc}${li.hours ? ` (${fmtHrs(li.hours)} @ ${fmtMoney(li.rate, cur)})` : ""} — ${fmtMoney(li.amount, cur)}`),
-    "", `Total: ${fmtMoney(total, cur)} ${cur}`,
+    "",
+    `Subtotal: ${fmtMoney(subtotal, cur)}`,
+    tax > 0 ? `Tax (${invoice.taxRate}%): ${fmtMoney(tax, cur)}` : null,
+    `Total: ${fmtMoney(total, cur)} ${cur}`,
+    !isReceipt && settings?.paymentTerms ? `\n${settings.paymentTerms}` : null,
+    !isReceipt && hasBankDetails ? `\nBanking details:\n${settings.bankName || ""}\n${settings.bankAccountName || ""}\n${settings.bankAccountNumber || ""}${settings.bankBranchCode ? `\nBranch: ${settings.bankBranchCode}` : ""}` : null,
   ].filter(Boolean).join("\n");
 
   const copy = () => { navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500); };
@@ -1468,16 +1519,22 @@ function InvoiceDoc({ invoice, clients, allInvoices, companyName }) {
       <div className="cd-doc-head">
         <div>
           {companyName && <div className="cd-doc-company">{companyName}</div>}
-          <div className="cd-doc-kind">{isReceipt ? "Receipt" : "Invoice"} · {cur}</div>
-          <div className="cd-doc-number mono">{invoice.number}</div>
+          {settings?.companyAddress && <div className="cd-muted" style={{ whiteSpace: "pre-line" }}>{settings.companyAddress}</div>}
+          {settings?.vatNumber && <div className="cd-muted">VAT No: {settings.vatNumber}</div>}
+          <div className="cd-doc-kind" style={{ marginTop: 8 }}>{isReceipt ? "Receipt" : "Invoice"} · {cur}</div>
+          <div className="cd-doc-number mono">{isReceipt ? receiptNumber : invoice.number}</div>
+          {isReceipt && <div className="cd-muted">For invoice {invoice.number}</div>}
         </div>
         <Stamp status={invoice.status} />
       </div>
       <div className="cd-doc-grid">
         <div><span>Bill to</span><strong>{client?.company || client?.name}</strong>{client?.email && <div className="cd-muted">{client.email}</div>}</div>
         <div><span>Date</span><strong className="mono">{fmtDate(invoice.date)}</strong></div>
-        <div><span>Due</span><strong className="mono">{fmtDate(invoice.dueDate)}</strong></div>
+        <div><span>{isReceipt ? "Paid" : "Due"}</span><strong className="mono">{fmtDate(isReceipt ? invoice.paidDate : invoice.dueDate)}</strong></div>
       </div>
+      {isReceipt && invoice.paymentMethod && (
+        <div className="cd-hint">Payment received via <strong>{invoice.paymentMethod}</strong></div>
+      )}
       <table className="cd-table">
         <thead><tr><th>Description</th><th>Hours</th><th>Rate</th><th>Amount</th></tr></thead>
         <tbody>
@@ -1491,7 +1548,22 @@ function InvoiceDoc({ invoice, clients, allInvoices, companyName }) {
           ))}
         </tbody>
       </table>
+      <div className="cd-invoice-total" style={{ fontSize: 13, fontWeight: 400 }}>Subtotal: <span className="mono">{fmtMoney(subtotal, cur)}</span></div>
+      {tax > 0 && <div className="cd-invoice-total" style={{ fontSize: 13, fontWeight: 400 }}>Tax ({invoice.taxRate}%): <span className="mono">{fmtMoney(tax, cur)}</span></div>}
       <div className="cd-invoice-total">Total: <span className="mono">{fmtMoney(total, cur)}</span></div>
+
+      {!isReceipt && settings?.paymentTerms && (
+        <div className="cd-notes" style={{ marginTop: 16 }}>{settings.paymentTerms}</div>
+      )}
+      {!isReceipt && hasBankDetails && (
+        <div className="cd-bank-details">
+          <div className="cd-subhead">Banking details</div>
+          {settings.bankName && <div className="cd-kv"><span>Bank</span><span>{settings.bankName}</span></div>}
+          {settings.bankAccountName && <div className="cd-kv"><span>Account name</span><span>{settings.bankAccountName}</span></div>}
+          {settings.bankAccountNumber && <div className="cd-kv"><span>Account number</span><span className="mono">{settings.bankAccountNumber}</span></div>}
+          {settings.bankBranchCode && <div className="cd-kv"><span>Branch code</span><span className="mono">{settings.bankBranchCode}</span></div>}
+        </div>
+      )}
 
       <div className="cd-subhead" style={{ marginTop: 20 }}>Client statement ({cur} invoices)</div>
       <table className="cd-table">
@@ -1734,6 +1806,162 @@ function ReportsView({ ctx }) {
   );
 }
 
+/* ------------------------------ Ledger ------------------------------ */
+function invoiceIsAR(inv) {
+  return inv.status === "sent" || inv.status === "overdue";
+}
+
+function LedgerView({ ctx }) {
+  const { invoices, expenses, settings } = ctx;
+  const [editing, setEditing] = useState(null); // "new" | expense
+
+  const save = (form) => {
+    if (form.id) expenses.update(form.id, form);
+    else expenses.add(form);
+    setEditing(null);
+  };
+
+  const currencies = [...new Set([
+    ...invoices.items.map((i) => i.currency || "USD"),
+    ...expenses.items.map((e) => e.currency || "USD"),
+  ])];
+  const activeCurrencies = currencies.length ? currencies : [settings.settings.defaultCurrency || "USD"];
+
+  const balanceSheet = activeCurrencies.map((cur) => {
+    const cash = invoices.items.filter((i) => i.status === "paid" && (i.currency || "USD") === cur).reduce((s, i) => s + invoiceTotal(i), 0)
+      - expenses.items.filter((e) => e.status === "paid" && (e.currency || "USD") === cur).reduce((s, e) => s + Number(e.amount || 0), 0);
+    const ar = invoices.items.filter((i) => invoiceIsAR(i) && (i.currency || "USD") === cur).reduce((s, i) => s + invoiceTotal(i), 0);
+    const ap = expenses.items.filter((e) => e.status === "unpaid" && (e.currency || "USD") === cur).reduce((s, e) => s + Number(e.amount || 0), 0);
+    const assets = cash + ar;
+    const liabilities = ap;
+    const equity = assets - liabilities;
+    return { cur, cash, ar, ap, assets, liabilities, equity };
+  });
+
+  const ledgerEntries = [
+    ...invoices.items.filter((i) => i.status === "paid").map((i) => ({
+      id: "inv-" + i.id, date: i.paidDate || i.date, type: "income", desc: `Invoice ${i.number}`, amount: invoiceTotal(i), currency: i.currency || "USD",
+    })),
+    ...expenses.items.filter((e) => e.status === "paid").map((e) => ({
+      id: "exp-" + e.id, date: e.date, type: "expense", desc: e.description || e.category || "Expense", amount: -Number(e.amount || 0), currency: e.currency || "USD",
+    })),
+  ].sort((a, b) => a.date.localeCompare(b.date));
+
+  const runningByCur = {};
+  const ledgerWithBalance = ledgerEntries.map((e) => {
+    runningByCur[e.currency] = (runningByCur[e.currency] || 0) + e.amount;
+    return { ...e, balance: runningByCur[e.currency] };
+  });
+
+  return (
+    <div className="cd-page">
+      <PageHead eyebrow="finances" title="Ledger" action={<Btn kind="primary" icon={Plus} onClick={() => setEditing("new")}>Add expense</Btn>} />
+
+      <div className="cd-cardgrid">
+        {balanceSheet.map((b) => (
+          <div className="cd-card" key={b.cur}>
+            <div className="cd-card-head"><h3>Balance sheet — {b.cur}</h3></div>
+            <div className="cd-kv"><span>Cash</span><span className="mono">{fmtMoney(b.cash, b.cur)}</span></div>
+            <div className="cd-kv"><span>Accounts receivable</span><span className="mono">{fmtMoney(b.ar, b.cur)}</span></div>
+            <div className="cd-kv" style={{ fontWeight: 700, borderTop: "1px solid var(--border)", paddingTop: 6, marginTop: 2 }}><span>Total assets</span><span className="mono">{fmtMoney(b.assets, b.cur)}</span></div>
+            <div className="cd-kv" style={{ marginTop: 10 }}><span>Accounts payable</span><span className="mono">{fmtMoney(b.liabilities, b.cur)}</span></div>
+            <div className="cd-kv" style={{ fontWeight: 700, borderTop: "1px solid var(--border)", paddingTop: 6, marginTop: 2 }}><span>Total liabilities</span><span className="mono">{fmtMoney(b.liabilities, b.cur)}</span></div>
+            <div className="cd-kv" style={{ marginTop: 10, fontWeight: 700, borderTop: "1px solid var(--ink)", paddingTop: 6 }}><span>Equity</span><span className="mono">{fmtMoney(b.equity, b.cur)}</span></div>
+          </div>
+        ))}
+      </div>
+
+      <section className="cd-card">
+        <div className="cd-card-head"><h3>Cash ledger</h3></div>
+        {ledgerWithBalance.length === 0 ? (
+          <Empty icon={BookOpen} title="No income or expenses recorded yet" hint="Paid invoices and paid expenses will show up here automatically." />
+        ) : (
+          <table className="cd-table">
+            <thead><tr><th>Date</th><th>Type</th><th>Description</th><th>Currency</th><th>Amount</th><th>Balance</th></tr></thead>
+            <tbody>
+              {ledgerWithBalance.map((e) => (
+                <tr key={e.id}>
+                  <td className="mono">{fmtDate(e.date)}</td>
+                  <td><span className="cd-stamp" style={{ "--stamp-color": e.type === "income" ? "var(--success)" : "var(--danger)" }}>{e.type}</span></td>
+                  <td>{e.desc}</td>
+                  <td className="mono">{e.currency}</td>
+                  <td className="mono" style={{ color: e.amount < 0 ? "var(--danger)" : "var(--success)" }}>{e.amount < 0 ? "-" : "+"}{fmtMoney(Math.abs(e.amount), e.currency)}</td>
+                  <td className="mono">{fmtMoney(e.balance, e.currency)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+
+      <section className="cd-card">
+        <div className="cd-card-head"><h3>All expenses</h3></div>
+        {expenses.items.length === 0 ? (
+          <Empty icon={Receipt} title="No expenses logged yet" hint="Track software, hosting, travel, and other business costs here." />
+        ) : (
+          <table className="cd-table">
+            <thead><tr><th>Date</th><th>Category</th><th>Description</th><th>Amount</th><th>Status</th><th /></tr></thead>
+            <tbody>
+              {[...expenses.items].sort((a, b) => b.date.localeCompare(a.date)).map((ex) => (
+                <tr key={ex.id}>
+                  <td className="mono">{fmtDate(ex.date)}</td>
+                  <td>{ex.category || "—"}</td>
+                  <td className="cd-td-desc">{ex.description || "—"}</td>
+                  <td className="mono">{fmtMoney(ex.amount, ex.currency)}</td>
+                  <td><span className="cd-stamp" style={{ "--stamp-color": ex.status === "paid" ? "var(--success)" : "var(--amber)" }}>{ex.status}</span></td>
+                  <td>
+                    <div className="cd-row-actions">
+                      <button className="cd-iconbtn" onClick={() => setEditing(ex)}><Pencil size={14} /></button>
+                      <button className="cd-iconbtn danger" onClick={() => expenses.remove(ex.id)}><Trash2 size={14} /></button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+
+      {editing && (
+        <Modal title={editing === "new" ? "Add expense" : "Edit expense"} onClose={() => setEditing(null)}>
+          <ExpenseForm initial={editing === "new" ? null : editing} defaultCurrency={settings.settings.defaultCurrency} onSave={save} />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function ExpenseForm({ initial, defaultCurrency, onSave }) {
+  const [form, setForm] = useState(initial || {
+    date: todayISO(), category: "", description: "", amount: "", currency: defaultCurrency || "USD", status: "paid",
+  });
+  const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+  return (
+    <form className="cd-form" onSubmit={(e) => { e.preventDefault(); onSave({ ...form, amount: Number(form.amount) || 0 }); }}>
+      <div className="cd-form-row">
+        <Field label="Date"><input type="date" required value={form.date} onChange={set("date")} /></Field>
+        <Field label="Currency">
+          <select value={form.currency} onChange={set("currency")}>
+            {CURRENCY_CODES.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </Field>
+      </div>
+      <Field label="Category"><input value={form.category} onChange={set("category")} placeholder="e.g. Software, Hosting, Travel" /></Field>
+      <Field label="Description"><input value={form.description} onChange={set("description")} placeholder="What was this for?" /></Field>
+      <div className="cd-form-row">
+        <Field label="Amount"><input type="number" min="0" step="0.01" required value={form.amount} onChange={set("amount")} /></Field>
+        <Field label="Status">
+          <select value={form.status} onChange={set("status")}>
+            <option value="paid">paid</option>
+            <option value="unpaid">unpaid</option>
+          </select>
+        </Field>
+      </div>
+      <div className="cd-form-actions"><Btn kind="primary" type="submit">Save expense</Btn></div>
+    </form>
+  );
+}
+
 /* ------------------------------ Admin ------------------------------ */
 function AdminView({ ctx }) {
   const { settings } = ctx;
@@ -1743,7 +1971,7 @@ function AdminView({ ctx }) {
 
   const onSubmit = (e) => {
     e.preventDefault();
-    settings.save({ ...form, defaultHourlyRate: Number(form.defaultHourlyRate) || 0 });
+    settings.save({ ...form, defaultHourlyRate: Number(form.defaultHourlyRate) || 0, defaultTaxRate: Number(form.defaultTaxRate) || 0 });
     setSaved(true);
     setTimeout(() => setSaved(false), 1500);
   };
@@ -1752,7 +1980,7 @@ function AdminView({ ctx }) {
     <div className="cd-page">
       <PageHead eyebrow="configuration" title="Admin" />
 
-      <section className="cd-card" style={{ maxWidth: 480 }}>
+      <section className="cd-card" style={{ maxWidth: 560 }}>
         <div className="cd-card-head"><h3>Company details</h3></div>
         <form className="cd-form" onSubmit={onSubmit}>
           <Field label="Company name"><input value={form.companyName} onChange={set("companyName")} placeholder="Pronto Digital SA" /></Field>
@@ -1769,6 +1997,23 @@ function AdminView({ ctx }) {
             </Field>
             <Field label="Default hourly rate"><input type="number" min="0" step="1" value={form.defaultHourlyRate} onChange={set("defaultHourlyRate")} /></Field>
           </div>
+          <div className="cd-form-row">
+            <Field label="VAT / Tax number"><input value={form.vatNumber} onChange={set("vatNumber")} placeholder="e.g. 4123456789" /></Field>
+            <Field label="Default tax / VAT rate (%)"><input type="number" min="0" step="0.1" value={form.defaultTaxRate} onChange={set("defaultTaxRate")} placeholder="e.g. 15" /></Field>
+          </div>
+          <Field label="Payment terms (shown on invoices)">
+            <textarea rows={2} value={form.paymentTerms} onChange={set("paymentTerms")} placeholder="Payment due within 14 days of invoice date." />
+          </Field>
+
+          <div className="cd-subhead" style={{ marginTop: 6 }}>Banking details (shown on invoices)</div>
+          <div className="cd-form-row">
+            <Field label="Bank name"><input value={form.bankName} onChange={set("bankName")} placeholder="e.g. Standard Bank" /></Field>
+            <Field label="Account name"><input value={form.bankAccountName} onChange={set("bankAccountName")} placeholder="Pronto Digital SA" /></Field>
+          </div>
+          <div className="cd-form-row">
+            <Field label="Account number"><input value={form.bankAccountNumber} onChange={set("bankAccountNumber")} /></Field>
+            <Field label="Branch code"><input value={form.bankBranchCode} onChange={set("bankBranchCode")} /></Field>
+          </div>
 
           <div className="cd-form-actions">
             <Btn kind="primary" type="submit" icon={saved ? Check : undefined}>{saved ? "Saved" : "Save settings"}</Btn>
@@ -1776,7 +2021,7 @@ function AdminView({ ctx }) {
         </form>
       </section>
 
-      <div className="cd-hint" style={{ maxWidth: 480 }}>
+      <div className="cd-hint" style={{ maxWidth: 560 }}>
         These settings drive the company name shown in the sidebar and on invoices, receipts, and statements, plus the defaults used when creating new invoices and projects.
       </div>
     </div>
@@ -1857,6 +2102,7 @@ const CSS = `
 .cd-kv{display:flex;justify-content:space-between;font-size:12.5px;padding:4px 0;color:var(--ink-soft);}
 .cd-kv span:last-child{color:var(--ink);}
 .cd-notes{font-size:12px;color:var(--ink-soft);margin-top:8px;padding-top:8px;border-top:1px solid var(--border);}
+.cd-bank-details{margin-top:10px;padding:12px 14px;background:var(--surface-2);border-radius:9px;}
 
 .cd-bar{height:5px;background:var(--surface-2);border-radius:4px;overflow:hidden;margin-top:6px;}
 .cd-bar-fill{height:100%;background:var(--accent);}
