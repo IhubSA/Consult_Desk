@@ -26,7 +26,7 @@ const DollarSign = mkIcon("$"); const Play = mkIcon("▶"); const Pause = mkIcon
 const FileText = mkIcon("📄"); const Send = mkIcon("➤"); const CircleCheck = mkIcon("✔");
 const AlertCircle = mkIcon("!"); const Settings = mkIcon("⚙"); const NotebookPen = mkIcon("📝");
 const Printer = mkIcon("🖶"); const BarChart3 = mkIcon("📊"); const Repeat = mkIcon("↻");
-const UserCheck = mkIcon("🙋"); const LogOut = mkIcon("⎋"); const BookOpen = mkIcon("📖");
+const UserCheck = mkIcon("🙋"); const LogOut = mkIcon("⎋"); const BookOpen = mkIcon("📖"); const ExternalLink = mkIcon("↗");
 
 /* ---- Supabase client (loaded from CDN as window.supabase) ---- */
 const SUPABASE_URL = "https://ziladpnlfajtiboavwvn.supabase.co";
@@ -595,15 +595,25 @@ function Dashboard({ ctx, goTo }) {
             <Empty icon={CalendarDays} title="Nothing scheduled" hint="Add a meeting from the Schedule tab." />
           ) : (
             <ul className="cd-list">
-              {upcoming.map((m) => (
-                <li key={m.id} className="cd-list-row">
-                  <div>
-                    <div className="cd-list-title">{m.title}</div>
-                    <div className="cd-list-sub">{clientName(clients, m.clientId)}</div>
-                  </div>
-                  <div className="cd-list-meta">{fmtDate(m.date)} · {m.time}</div>
-                </li>
-              ))}
+              {upcoming.map((m) => {
+                const joinUrl = m.link || (m.notes && m.notes.match(/https?:\/\/\S+/)?.[0]) || null;
+                return (
+                  <li key={m.id} className="cd-list-row">
+                    <div>
+                      <div className="cd-list-title">{m.title}</div>
+                      <div className="cd-list-sub">{clientName(clients, m.clientId)}</div>
+                    </div>
+                    <div className="cd-row-actions">
+                      <div className="cd-list-meta">{fmtDate(m.date)} · {m.time}</div>
+                      {joinUrl && (
+                        <a className="cd-btn primary" href={joinUrl} target="_blank" rel="noopener noreferrer" title="Open meeting link">
+                          <ExternalLink size={14} /> Join
+                        </a>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </section>
@@ -1120,6 +1130,7 @@ function ScheduleView({ ctx }) {
     const isPast = m.date < todayISO();
     const alreadyLogged = timeEntries.items.some((t) => t.meetingId === m.id);
     const noteCount = clientNotes.items.filter((n) => n.meetingId === m.id).length;
+    const joinUrl = m.link || (m.notes && m.notes.match(/https?:\/\/\S+/)?.[0]) || null;
     return (
       <li className="cd-list-row" key={m.id}>
         <div>
@@ -1128,6 +1139,11 @@ function ScheduleView({ ctx }) {
         </div>
         <div className="cd-row-actions">
           <div className="cd-list-meta">{fmtDate(m.date)} · {m.time}</div>
+          {joinUrl && (
+            <a className="cd-btn primary" href={joinUrl} target="_blank" rel="noopener noreferrer" title="Open meeting link">
+              <ExternalLink size={14} /> Join
+            </a>
+          )}
           {isPast && !alreadyLogged && (
             <button className="cd-iconbtn" title="Log hours for this meeting" onClick={() => setLoggingFor(m)}><Clock size={14} /></button>
           )}
@@ -1230,7 +1246,7 @@ function MeetingNoteForm({ meeting, clientNotes, onDone }) {
 
 function MeetingForm({ initial, clients, projects, onSave }) {
   const [form, setForm] = useState(initial || {
-    title: "", clientId: clients[0]?.id || "", projectId: "", date: todayISO(), time: "10:00", notes: "",
+    title: "", clientId: clients[0]?.id || "", projectId: "", date: todayISO(), time: "10:00", notes: "", link: "",
   });
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
   const clientProjects = projects.filter((p) => p.clientId === form.clientId);
@@ -1252,7 +1268,8 @@ function MeetingForm({ initial, clients, projects, onSave }) {
         <Field label="Date"><input type="date" required value={form.date} onChange={set("date")} /></Field>
         <Field label="Time"><input type="time" required value={form.time} onChange={set("time")} /></Field>
       </div>
-      <Field label="Notes"><textarea rows={2} value={form.notes} onChange={set("notes")} placeholder="Agenda, link, prep…" /></Field>
+      <Field label="Meeting link (Zoom, Teams, Meet, etc.)"><input type="url" value={form.link} onChange={set("link")} placeholder="https://..." /></Field>
+      <Field label="Notes"><textarea rows={2} value={form.notes} onChange={set("notes")} placeholder="Agenda, prep…" /></Field>
       <div className="cd-form-actions"><Btn kind="primary" type="submit">Save meeting</Btn></div>
     </form>
   );
