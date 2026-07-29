@@ -26,7 +26,7 @@ const DollarSign = mkIcon("$"); const Play = mkIcon("▶"); const Pause = mkIcon
 const FileText = mkIcon("📄"); const Send = mkIcon("➤"); const CircleCheck = mkIcon("✔");
 const AlertCircle = mkIcon("!"); const Settings = mkIcon("⚙"); const NotebookPen = mkIcon("📝");
 const Printer = mkIcon("🖶"); const BarChart3 = mkIcon("📊"); const Repeat = mkIcon("↻");
-const UserCheck = mkIcon("🙋"); const LogOut = mkIcon("⎋"); const BookOpen = mkIcon("📖"); const ExternalLink = mkIcon("↗");
+const UserCheck = mkIcon("🙋"); const LogOut = mkIcon("⎋"); const BookOpen = mkIcon("📖"); const ExternalLink = mkIcon("↗"); const FileSignature = mkIcon("📋");
 
 /* ---- Supabase client (loaded from CDN as window.supabase) ---- */
 const SUPABASE_URL = "https://ziladpnlfajtiboavwvn.supabase.co";
@@ -88,9 +88,11 @@ function useSupabaseCollection(table, orderColumn = "created_at") {
       .single();
     if (error) {
       console.error(`Failed to add to ${table}:`, error.message);
-      return;
+      return null;
     }
-    setItems((prev) => [keysFromDb(data), ...prev]);
+    const row = keysFromDb(data);
+    setItems((prev) => [row, ...prev]);
+    return row;
   }, [table]);
 
   const update = useCallback(async (id, patch) => {
@@ -148,6 +150,7 @@ const DEFAULT_SETTINGS = {
   companyEmail: "ihubsa@gmail.com",
   companyAddress: "",
   invoicePrefix: "INV",
+  quotePrefix: "QTE",
   defaultHourlyRate: 100,
   defaultCurrency: "USD",
   bankName: "",
@@ -320,6 +323,7 @@ const monthLabelShort = (ym) => new Date(ym + "-01T00:00:00").toLocaleDateString
 const STATUS_COLORS = {
   active: "var(--accent)", paused: "var(--amber)", completed: "var(--ink-soft)",
   draft: "var(--ink-soft)", sent: "var(--amber)", paid: "var(--success)", overdue: "var(--danger)",
+  accepted: "var(--success)", declined: "var(--danger)", expired: "var(--ink-soft)",
 };
 
 /* ------------------------------ shell UI ------------------------------ */
@@ -329,6 +333,7 @@ const NAV = [
   { key: "projects", label: "Projects", icon: FolderKanban },
   { key: "time", label: "Time", icon: Clock },
   { key: "schedule", label: "Schedule", icon: CalendarDays },
+  { key: "quotes", label: "Quotes", icon: FileSignature },
   { key: "billing", label: "Billing", icon: Receipt },
   { key: "messages", label: "Messages", icon: Mail },
   { key: "reports", label: "Reports", icon: BarChart3 },
@@ -347,10 +352,11 @@ function App() {
   const clientNotes = useCollection("client_notes");
   const comms = useCollection("comms");
   const expenses = useCollection("expenses");
+  const quotes = useCollection("quotes");
   const settingsHook = useSettings();
 
-  const ctx = { clients, projects, timeEntries, meetings, invoices, clientNotes, comms, expenses, settings: settingsHook };
-  const loading = !clients.ready || !projects.ready || !timeEntries.ready || !meetings.ready || !invoices.ready || !clientNotes.ready || !comms.ready || !expenses.ready || !settingsHook.ready;
+  const ctx = { clients, projects, timeEntries, meetings, invoices, clientNotes, comms, expenses, quotes, settings: settingsHook };
+  const loading = !clients.ready || !projects.ready || !timeEntries.ready || !meetings.ready || !invoices.ready || !clientNotes.ready || !comms.ready || !expenses.ready || !quotes.ready || !settingsHook.ready;
 
   // Automations: run once per session after data loads — flip overdue invoices,
   // and generate draft retainer invoices for active retainer projects that are due.
@@ -429,6 +435,7 @@ function App() {
             {tab === "projects" && <ProjectsView ctx={ctx} />}
             {tab === "time" && <TimeView ctx={ctx} />}
             {tab === "schedule" && <ScheduleView ctx={ctx} />}
+            {tab === "quotes" && <QuotesView ctx={ctx} />}
             {tab === "billing" && <BillingView ctx={ctx} />}
             {tab === "messages" && <MessagesView ctx={ctx} />}
             {tab === "reports" && <ReportsView ctx={ctx} />}
@@ -1275,7 +1282,302 @@ function MeetingForm({ initial, clients, projects, onSave }) {
   );
 }
 
+/* ------------------------------ Quotes ------------------------------ */
+function quoteSubtotal(q) {
+  return (q.lineItems || []).reduce((s, li) => s + Number(li.amount || 0), 0);
+}
+function quoteTax(q) {
+  return quoteSubtotal(q) * (Number(q.taxRate || 0) / 100);
+}
+function quoteTotal(q) {
+  return quoteSubtotal(q) + quoteTax(q);
+}
+function nextQuoteNumber(quotes, prefix) {
+  const nums = quotes.map((q) => parseInt((q.number || "").replace(/\D/g, ""), 10)).filter((n) => !isNaN(n));
+  const next = (nums.length ? Math.max(...nums) : 2000) + 1;
+  return `${prefix || "QTE"}-${next}`;
+}
+
+function QuotesView({ ctx }) {
+  const { clients, projects, quotes, settings } = ctx;
+  const [editing, setEditing] = useState(null); // "new" | quote
+  const [viewing, setViewing] = useState(null); // quote to view/print
+  const [filter, setFilter] = useState("all");
+
+  const list = quotes.items.filter((q) => filter === "all" || q.status === filter).sort((a, b) => b.date.localeCompare(a.date));
+
+  const save = (form) => {
+    if (form.id) quotes.update(form.id, form);
+    else quotes.add({ ...form, number: form.number || nextQuoteNumber(quotes.items, settings.settings.quotePrefix) });
+    setEditing(null);
+  };
+
+  const setStatus = (q, status) => quotes.update(q.id, { status });
+
+  const convertToProject = async (q) => {
+    const totalHours = (q.lineItems || []).reduce((s, li) => s + Number(li.hours || 0), 0);
+    const subtotal = quoteSubtotal(q);
+    const blendedRate = totalHours > 0
+      ? Math.round((subtotal / totalHours) * 100) / 100
+      : Number(q.lineItems?.[0]?.rate || settings.settings.defaultHourlyRate || 0);
+    const client = clients.items.find((c) => c.id === q.clientId);
+    const summary = (q.lineItems || []).map((li) => `• ${li.desc}${li.hours ? ` (${fmtHrs(li.hours)})` : ""} — ${fmtMoney(li.amount, q.currency)}`).join("\n");
+
+    const newProject = await projects.add({
+      clientId: q.clientId,
+      name: `${client?.company || client?.name || "New client"} — ${q.number}`,
+      status: "active",
+      hourlyRate: blendedRate,
+      currency: q.currency || "USD",
+      budgetHours: totalHours || "",
+      notes: `Converted from quote ${q.number}.\n${summary}`,
+      isRetainer: false,
+      retainerAmount: "",
+      retainerDay: "",
+    });
+
+    if (newProject) {
+      quotes.update(q.id, { status: "accepted", convertedProjectId: newProject.id });
+    }
+  };
+
+  return (
+    <div className="cd-page">
+      <PageHead
+        eyebrow="proposals"
+        title="Quotes"
+        action={<Btn kind="primary" icon={Plus} onClick={() => setEditing("new")} disabled={clients.items.length === 0}>New quote</Btn>}
+      />
+
+      <div className="cd-tabs">
+        {["all", "draft", "sent", "accepted", "declined", "expired"].map((f) => (
+          <button key={f} className={"cd-tab" + (filter === f ? " active" : "")} onClick={() => setFilter(f)}>{f}</button>
+        ))}
+      </div>
+
+      {clients.items.length === 0 ? (
+        <Empty icon={FileSignature} title="Add a client first" hint="Quotes are linked to a client." />
+      ) : quotes.items.length === 0 ? (
+        <Empty icon={FileSignature} title="No quotes yet" hint="Build a quote from hours and a rate, send it, and convert it to a project once accepted." />
+      ) : list.length === 0 ? (
+        <Empty icon={FileSignature} title="Nothing here" />
+      ) : (
+        <table className="cd-table">
+          <thead><tr><th>Number</th><th>Client</th><th>Date</th><th>Valid until</th><th>Currency</th><th>Total</th><th>Status</th><th /></tr></thead>
+          <tbody>
+            {list.map((q) => (
+              <tr key={q.id}>
+                <td className="mono">{q.number}</td>
+                <td>{clientName(clients, q.clientId)}</td>
+                <td className="mono">{fmtDate(q.date)}</td>
+                <td className="mono">{fmtDate(q.validUntil)}</td>
+                <td className="mono">{q.currency || "USD"}</td>
+                <td className="mono">{fmtMoney(quoteTotal(q), q.currency)}</td>
+                <td><Stamp status={q.status} /></td>
+                <td>
+                  <div className="cd-row-actions">
+                    <button className="cd-iconbtn" onClick={() => setViewing(q)} title="View / print"><FileText size={14} /></button>
+                    {q.status === "draft" && <button className="cd-iconbtn" onClick={() => setEditing(q)} title="Edit"><Pencil size={14} /></button>}
+                    {q.status === "draft" && <button className="cd-iconbtn" onClick={() => setStatus(q, "sent")} title="Mark sent"><Send size={14} /></button>}
+                    {q.status === "sent" && <button className="cd-iconbtn" onClick={() => setStatus(q, "accepted")} title="Mark accepted"><CircleCheck size={14} /></button>}
+                    {q.status === "sent" && <button className="cd-iconbtn" onClick={() => setStatus(q, "declined")} title="Mark declined"><X size={14} /></button>}
+                    {q.status === "accepted" && !q.convertedProjectId && (
+                      <Btn kind="primary" icon={FolderKanban} onClick={() => convertToProject(q)}>Create project</Btn>
+                    )}
+                    {q.convertedProjectId && <span className="cd-muted-mono">→ project created</span>}
+                    <button className="cd-iconbtn danger" onClick={() => { if (confirm("Delete this quote?")) quotes.remove(q.id); }}><Trash2 size={14} /></button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {editing && (
+        <Modal title={editing === "new" ? "New quote" : "Edit quote"} onClose={() => setEditing(null)} wide>
+          <QuoteForm initial={editing === "new" ? null : editing} clients={clients.items} settings={settings.settings} onSave={save} />
+        </Modal>
+      )}
+
+      {viewing && (
+        <Modal title={viewing.number} onClose={() => setViewing(null)} wide>
+          <QuoteDoc quote={viewing} clients={clients.items} companyName={settings.settings.companyName} settings={settings.settings} />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function QuoteForm({ initial, clients, settings, onSave }) {
+  const [clientId, setClientId] = useState(initial?.clientId || clients[0]?.id || "");
+  const [currency, setCurrency] = useState(initial?.currency || settings?.defaultCurrency || "USD");
+  const [date, setDate] = useState(initial?.date || todayISO());
+  const [validUntil, setValidUntil] = useState(initial?.validUntil || (() => {
+    const d = new Date(); d.setDate(d.getDate() + 30); return d.toISOString().slice(0, 10);
+  })());
+  const [taxRate, setTaxRate] = useState(initial?.taxRate ?? settings?.defaultTaxRate ?? 0);
+  const [notes, setNotes] = useState(initial?.notes || "");
+  const [items, setItems] = useState(initial?.lineItems?.length ? initial.lineItems : [{ desc: "", hours: "", rate: settings?.defaultHourlyRate || 0 }]);
+
+  const updateItem = (i, patch) => setItems(items.map((it, idx) => idx === i ? { ...it, ...patch } : it));
+  const addItem = () => setItems([...items, { desc: "", hours: "", rate: settings?.defaultHourlyRate || 0 }]);
+  const removeItem = (i) => setItems(items.filter((_, idx) => idx !== i));
+
+  const lineItems = items
+    .filter((it) => it.desc)
+    .map((it) => ({ desc: it.desc, hours: Number(it.hours) || 0, rate: Number(it.rate) || 0, amount: (Number(it.hours) || 0) * (Number(it.rate) || 0) }));
+  const subtotal = lineItems.reduce((s, li) => s + li.amount, 0);
+  const taxAmount = subtotal * (Number(taxRate || 0) / 100);
+  const total = subtotal + taxAmount;
+
+  return (
+    <form className="cd-form" onSubmit={(e) => {
+      e.preventDefault();
+      if (lineItems.length === 0) return;
+      onSave({
+        id: initial?.id,
+        number: initial?.number,
+        clientId, currency, date, validUntil, taxRate: Number(taxRate) || 0, notes,
+        lineItems, status: initial?.status || "draft",
+      });
+    }}>
+      <div className="cd-form-row">
+        <Field label="Client">
+          <select value={clientId} onChange={(e) => setClientId(e.target.value)}>
+            {clients.map((c) => <option key={c.id} value={c.id}>{c.company || c.name}</option>)}
+          </select>
+        </Field>
+        <Field label="Currency">
+          <select value={currency} onChange={(e) => setCurrency(e.target.value)}>
+            {CURRENCY_CODES.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </Field>
+      </div>
+      <div className="cd-form-row">
+        <Field label="Quote date"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+        <Field label="Valid until"><input type="date" value={validUntil} onChange={(e) => setValidUntil(e.target.value)} /></Field>
+        <Field label="Tax / VAT rate (%)"><input type="number" min="0" step="0.1" value={taxRate} onChange={(e) => setTaxRate(e.target.value)} /></Field>
+      </div>
+
+      <div className="cd-subhead">Line items — e.g. one per swim lane, deck, or phase</div>
+      {items.map((it, i) => (
+        <div className="cd-form-row" key={i}>
+          <input placeholder="Description (e.g. Deck 1 — Backend API)" value={it.desc} onChange={(e) => updateItem(i, { desc: e.target.value })} style={{ flex: 2 }} />
+          <input type="number" placeholder="Hours" min="0" step="0.25" value={it.hours} onChange={(e) => updateItem(i, { hours: e.target.value })} style={{ maxWidth: 90 }} />
+          <input type="number" placeholder="Rate" min="0" step="1" value={it.rate} onChange={(e) => updateItem(i, { rate: e.target.value })} style={{ maxWidth: 100 }} />
+          <span className="mono" style={{ minWidth: 90, textAlign: "right", alignSelf: "center", fontSize: 12.5 }}>{fmtMoney((Number(it.hours) || 0) * (Number(it.rate) || 0), currency)}</span>
+          <button type="button" className="cd-iconbtn danger" onClick={() => removeItem(i)}><Trash2 size={14} /></button>
+        </div>
+      ))}
+      <button type="button" className="cd-linkbtn" onClick={addItem}><Plus size={14} /> Add line item</button>
+
+      <Field label="Notes / terms"><textarea rows={3} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Scope assumptions, exclusions, terms…" /></Field>
+
+      <div className="cd-invoice-total" style={{ fontSize: 13, fontWeight: 400 }}>Subtotal: <span className="mono">{fmtMoney(subtotal, currency)}</span></div>
+      {taxAmount > 0 && <div className="cd-invoice-total" style={{ fontSize: 13, fontWeight: 400 }}>Tax ({taxRate}%): <span className="mono">{fmtMoney(taxAmount, currency)}</span></div>}
+      <div className="cd-invoice-total">Total: <span className="mono">{fmtMoney(total, currency)}</span></div>
+
+      <div className="cd-form-actions"><Btn kind="primary" type="submit" disabled={lineItems.length === 0}>Save quote</Btn></div>
+    </form>
+  );
+}
+
+function QuoteDoc({ quote, clients, companyName, settings }) {
+  const [copied, setCopied] = useState(false);
+  const client = clients.find((c) => c.id === quote.clientId);
+  const cur = quote.currency || "USD";
+  const subtotal = quoteSubtotal(quote);
+  const tax = quoteTax(quote);
+  const total = quoteTotal(quote);
+
+  const text = [
+    companyName || null,
+    settings?.companyAddress || null,
+    settings?.vatNumber ? `VAT No: ${settings.vatNumber}` : null,
+    "", "QUOTE", quote.number, "",
+    `Prepared for: ${client?.company || client?.name || "—"}`,
+    client?.email ? `Email: ${client.email}` : null,
+    `Date: ${fmtDate(quote.date)}`,
+    `Valid until: ${fmtDate(quote.validUntil)}`,
+    "", "Line items:",
+    ...quote.lineItems.map((li) => `- ${li.desc}${li.hours ? ` (${fmtHrs(li.hours)} @ ${fmtMoney(li.rate, cur)})` : ""} — ${fmtMoney(li.amount, cur)}`),
+    "",
+    `Subtotal: ${fmtMoney(subtotal, cur)}`,
+    tax > 0 ? `Tax (${quote.taxRate}%): ${fmtMoney(tax, cur)}` : null,
+    `Total: ${fmtMoney(total, cur)} ${cur}`,
+    quote.notes ? `\n${quote.notes}` : null,
+  ].filter(Boolean).join("\n");
+
+  const copy = () => { navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500); };
+
+  return (
+    <div className="cd-doc">
+      <DocLetterhead companyName={companyName} settings={settings} kind="Quote" number={quote.number} currency={cur} status={quote.status} />
+      <div className="cd-doc-grid">
+        <div><span>Prepared for</span><strong>{client?.company || client?.name}</strong>{client?.email && <div className="cd-muted">{client.email}</div>}</div>
+        <div><span>Date</span><strong className="mono">{fmtDate(quote.date)}</strong></div>
+        <div><span>Valid until</span><strong className="mono">{fmtDate(quote.validUntil)}</strong></div>
+      </div>
+      <table className="cd-table">
+        <thead><tr><th>Description</th><th>Hours</th><th>Rate</th><th>Amount</th></tr></thead>
+        <tbody>
+          {quote.lineItems.map((li, i) => (
+            <tr key={i}>
+              <td>{li.desc}</td>
+              <td className="mono">{li.hours ? fmtHrs(li.hours) : "—"}</td>
+              <td className="mono">{li.rate ? fmtMoney(li.rate, cur) : "—"}</td>
+              <td className="mono">{fmtMoney(li.amount, cur)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="cd-invoice-total" style={{ fontSize: 13, fontWeight: 400 }}>Subtotal: <span className="mono">{fmtMoney(subtotal, cur)}</span></div>
+      {tax > 0 && <div className="cd-invoice-total" style={{ fontSize: 13, fontWeight: 400 }}>Tax ({quote.taxRate}%): <span className="mono">{fmtMoney(tax, cur)}</span></div>}
+      <div className="cd-invoice-total">Total: <span className="mono">{fmtMoney(total, cur)}</span></div>
+
+      {quote.notes && (
+        <div className="cd-bank-details">
+          <div className="cd-subhead">Terms &amp; notes</div>
+          <div style={{ fontSize: 12.5, color: "var(--ink-soft)", whiteSpace: "pre-line", marginTop: 4 }}>{quote.notes}</div>
+        </div>
+      )}
+
+      <div className="cd-doc-footer">This quote is valid until {fmtDate(quote.validUntil)}. Thank you for the opportunity to work together.</div>
+
+      <div className="cd-form-actions">
+        <Btn icon={Printer} onClick={() => window.print()}>Print / Save as PDF</Btn>
+        <Btn kind="primary" icon={copied ? Check : Copy} onClick={copy}>{copied ? "Copied" : "Copy as text"}</Btn>
+      </div>
+    </div>
+  );
+}
+
 /* ------------------------------ Billing ------------------------------ */
+function DocLetterhead({ companyName, settings, kind, number, subtitle, currency, status }) {
+  return (
+    <div className="cd-doc-head">
+      <div className="cd-doc-letterhead">
+        <img src={LOGO_DATA_URI} alt={companyName || "Company logo"} className="cd-doc-logo" />
+        <div>
+          {companyName && <div className="cd-doc-company">{companyName}</div>}
+          {settings?.companyAddress && <div className="cd-muted" style={{ whiteSpace: "pre-line" }}>{settings.companyAddress}</div>}
+          <div className="cd-muted">
+            {settings?.companyEmail || null}
+            {settings?.vatNumber ? `${settings?.companyEmail ? " · " : ""}VAT No: ${settings.vatNumber}` : null}
+          </div>
+        </div>
+      </div>
+      <div className="cd-doc-head-right">
+        <div className="cd-doc-kind">{kind}{currency ? ` · ${currency}` : ""}</div>
+        <div className="cd-doc-number mono">{number}</div>
+        {subtitle && <div className="cd-muted">{subtitle}</div>}
+        <Stamp status={status} />
+      </div>
+    </div>
+  );
+}
+
 function invoiceSubtotal(inv) {
   return (inv.lineItems || []).reduce((s, li) => s + Number(li.amount || 0), 0);
 }
@@ -1529,17 +1831,15 @@ function InvoiceDoc({ invoice, clients, allInvoices, companyName, settings }) {
 
   return (
     <div className="cd-doc">
-      <div className="cd-doc-head">
-        <div>
-          {companyName && <div className="cd-doc-company">{companyName}</div>}
-          {settings?.companyAddress && <div className="cd-muted" style={{ whiteSpace: "pre-line" }}>{settings.companyAddress}</div>}
-          {settings?.vatNumber && <div className="cd-muted">VAT No: {settings.vatNumber}</div>}
-          <div className="cd-doc-kind" style={{ marginTop: 8 }}>{isReceipt ? "Receipt" : "Invoice"} · {cur}</div>
-          <div className="cd-doc-number mono">{isReceipt ? receiptNumber : invoice.number}</div>
-          {isReceipt && <div className="cd-muted">For invoice {invoice.number}</div>}
-        </div>
-        <Stamp status={invoice.status} />
-      </div>
+      <DocLetterhead
+        companyName={companyName}
+        settings={settings}
+        kind={isReceipt ? "Receipt" : "Invoice"}
+        number={isReceipt ? receiptNumber : invoice.number}
+        subtitle={isReceipt ? `For invoice ${invoice.number}` : null}
+        currency={cur}
+        status={invoice.status}
+      />
       <div className="cd-doc-grid">
         <div><span>Bill to</span><strong>{client?.company || client?.name}</strong>{client?.email && <div className="cd-muted">{client.email}</div>}</div>
         <div><span>Date</span><strong className="mono">{fmtDate(invoice.date)}</strong></div>
@@ -1593,6 +1893,8 @@ function InvoiceDoc({ invoice, clients, allInvoices, companyName, settings }) {
         </tbody>
       </table>
       <div className="cd-invoice-total">Balance due: <span className="mono">{fmtMoney(balanceDue, cur)}</span></div>
+
+      <div className="cd-doc-footer">{isReceipt ? "Thank you for your payment." : "Thank you for your business."}</div>
 
       <div className="cd-form-actions">
         <Btn icon={Printer} onClick={() => window.print()}>Print / Save as PDF</Btn>
@@ -2003,6 +2305,7 @@ function AdminView({ ctx }) {
           <div className="cd-subhead" style={{ marginTop: 6 }}>Billing defaults</div>
           <div className="cd-form-row">
             <Field label="Invoice number prefix"><input value={form.invoicePrefix} onChange={set("invoicePrefix")} placeholder="INV" /></Field>
+            <Field label="Quote number prefix"><input value={form.quotePrefix} onChange={set("quotePrefix")} placeholder="QTE" /></Field>
             <Field label="Default currency">
               <select value={form.defaultCurrency} onChange={set("defaultCurrency")}>
                 {CURRENCY_CODES.map((c) => <option key={c} value={c}>{CURRENCIES[c].label}</option>)}
@@ -2169,12 +2472,16 @@ const CSS = `
 .cd-checklist label span:nth-child(2){flex:1;}
 .cd-invoice-total{font-size:15px;font-weight:700;text-align:right;padding-top:6px;}
 
-.cd-doc{display:flex;flex-direction:column;gap:14px;}
-.cd-doc-head{display:flex;justify-content:space-between;align-items:flex-start;}
+.cd-doc{display:flex;flex-direction:column;gap:14px;padding-top:14px;border-top:4px solid var(--amber);}
+.cd-doc-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;}
+.cd-doc-letterhead{display:flex;align-items:flex-start;gap:14px;}
+.cd-doc-logo{height:52px;width:auto;object-fit:contain;flex-shrink:0;}
+.cd-doc-head-right{text-align:right;display:flex;flex-direction:column;align-items:flex-end;gap:3px;}
 .cd-doc-company{font-family:var(--font-display);font-size:18px;font-weight:700;color:var(--petrol);margin-bottom:4px;}
 .cd-doc-kind{font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:1.4px;color:var(--ink-soft);}
 .cd-doc-number{font-size:19px;font-weight:700;color:#000;}
 .cd-doc-grid{display:grid;grid-template-columns:1.4fr 1fr 1fr;gap:14px;font-size:12.5px;padding:14px;background:var(--surface-2);border-radius:9px;}
+.cd-doc-footer{font-size:12px;color:var(--ink-soft);text-align:center;font-style:italic;padding-top:6px;border-top:1px solid var(--border);}
 .cd-doc-grid span{display:block;color:var(--ink-soft);font-size:10.5px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px;}
 .cd-draft{white-space:pre-wrap;font-family:var(--font-mono);font-size:12.5px;line-height:1.6;background:var(--bg);border:1px solid var(--border);border-radius:9px;padding:14px;min-height:220px;}
 
