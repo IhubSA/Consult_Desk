@@ -1418,15 +1418,28 @@ function QuoteForm({ initial, clients, settings, onSave }) {
   })());
   const [taxRate, setTaxRate] = useState(initial?.taxRate ?? settings?.defaultTaxRate ?? 0);
   const [notes, setNotes] = useState(initial?.notes || "");
-  const [items, setItems] = useState(initial?.lineItems?.length ? initial.lineItems : [{ desc: "", hours: "", rate: settings?.defaultHourlyRate || 0 }]);
+  const [items, setItems] = useState(initial?.lineItems?.length ? initial.lineItems.map((li) => ({
+    desc: li.desc || "", hours: li.hours || "", rate: li.rate || "", amount: li.amount || "",
+  })) : [{ desc: "", hours: "", rate: "", amount: "" }]);
 
-  const updateItem = (i, patch) => setItems(items.map((it, idx) => idx === i ? { ...it, ...patch } : it));
-  const addItem = () => setItems([...items, { desc: "", hours: "", rate: settings?.defaultHourlyRate || 0 }]);
+  const updateItem = (i, patch) => setItems(items.map((it, idx) => {
+    if (idx !== i) return it;
+    const next = { ...it, ...patch };
+    // Convenience: auto-fill amount from hours × rate, but only when both are set —
+    // leave it alone otherwise so a flat fee typed directly into Amount isn't overwritten.
+    if ("hours" in patch || "rate" in patch) {
+      const h = Number(next.hours) || 0;
+      const r = Number(next.rate) || 0;
+      if (h > 0 && r > 0) next.amount = h * r;
+    }
+    return next;
+  }));
+  const addItem = () => setItems([...items, { desc: "", hours: "", rate: "", amount: "" }]);
   const removeItem = (i) => setItems(items.filter((_, idx) => idx !== i));
 
   const lineItems = items
-    .filter((it) => it.desc)
-    .map((it) => ({ desc: it.desc, hours: Number(it.hours) || 0, rate: Number(it.rate) || 0, amount: (Number(it.hours) || 0) * (Number(it.rate) || 0) }));
+    .filter((it) => it.desc && Number(it.amount) > 0)
+    .map((it) => ({ desc: it.desc, hours: Number(it.hours) || 0, rate: Number(it.rate) || 0, amount: Number(it.amount) || 0 }));
   const subtotal = lineItems.reduce((s, li) => s + li.amount, 0);
   const taxAmount = subtotal * (Number(taxRate || 0) / 100);
   const total = subtotal + taxAmount;
@@ -1461,12 +1474,13 @@ function QuoteForm({ initial, clients, settings, onSave }) {
       </div>
 
       <div className="cd-subhead">Line items — e.g. one per swim lane, deck, or phase</div>
+      <div className="cd-hint" style={{ marginBottom: 4 }}>Fill in Hours + Rate for time-based work, or just type a flat Amount for anything else (e.g. materials, a fixed-fee deliverable).</div>
       {items.map((it, i) => (
         <div className="cd-form-row" key={i}>
           <input placeholder="Description (e.g. Deck 1 — Backend API)" value={it.desc} onChange={(e) => updateItem(i, { desc: e.target.value })} style={{ flex: 2 }} />
-          <input type="number" placeholder="Hours" min="0" step="0.25" value={it.hours} onChange={(e) => updateItem(i, { hours: e.target.value })} style={{ maxWidth: 90 }} />
-          <input type="number" placeholder="Rate" min="0" step="1" value={it.rate} onChange={(e) => updateItem(i, { rate: e.target.value })} style={{ maxWidth: 100 }} />
-          <span className="mono" style={{ minWidth: 90, textAlign: "right", alignSelf: "center", fontSize: 12.5 }}>{fmtMoney((Number(it.hours) || 0) * (Number(it.rate) || 0), currency)}</span>
+          <input type="number" placeholder="Hours (optional)" min="0" step="0.25" value={it.hours} onChange={(e) => updateItem(i, { hours: e.target.value })} style={{ maxWidth: 100 }} />
+          <input type="number" placeholder="Rate (optional)" min="0" step="1" value={it.rate} onChange={(e) => updateItem(i, { rate: e.target.value })} style={{ maxWidth: 100 }} />
+          <input type="number" placeholder="Amount" min="0" step="0.01" value={it.amount} onChange={(e) => updateItem(i, { amount: e.target.value })} style={{ maxWidth: 110 }} />
           <button type="button" className="cd-iconbtn danger" onClick={() => removeItem(i)}><Trash2 size={14} /></button>
         </div>
       ))}
