@@ -735,6 +735,8 @@ function ClientsView({ ctx }) {
                 </div>
                 <div className="cd-kv"><span>Email</span><span>{c.email || "—"}</span></div>
                 <div className="cd-kv"><span>Phone</span><span>{c.phone || "—"}</span></div>
+                {c.address && <div className="cd-kv"><span>Address</span><span style={{ whiteSpace: "pre-line", textAlign: "right" }}>{c.address}</span></div>}
+                {c.taxNumber && <div className="cd-kv"><span>Tax / VAT no.</span><span className="mono">{c.taxNumber}</span></div>}
                 <div className="cd-kv"><span>Projects</span><span>{cProjects.length}</span></div>
                 <div className="cd-kv"><span>Hours logged</span><span className="mono">{fmtHrs(hrs)}</span></div>
                 {c.notes && <div className="cd-notes">{c.notes}</div>}
@@ -812,7 +814,7 @@ function ClientNotesPanel({ client, clientNotes }) {
 }
 
 function ClientForm({ initial, onSave }) {
-  const [form, setForm] = useState(initial || { name: "", company: "", email: "", phone: "", notes: "" });
+  const [form, setForm] = useState(initial || { name: "", company: "", email: "", phone: "", address: "", taxNumber: "", notes: "" });
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
   return (
     <form className="cd-form" onSubmit={(e) => { e.preventDefault(); onSave(form); }}>
@@ -820,6 +822,8 @@ function ClientForm({ initial, onSave }) {
       <Field label="Company"><input value={form.company} onChange={set("company")} placeholder="Reyes Retail Co." /></Field>
       <Field label="Email"><input type="email" value={form.email} onChange={set("email")} placeholder="jamie@company.com" /></Field>
       <Field label="Phone"><input value={form.phone} onChange={set("phone")} placeholder="(555) 010-0192" /></Field>
+      <Field label="Address"><textarea rows={2} value={form.address} onChange={set("address")} placeholder="Street, city, postal code, country" /></Field>
+      <Field label="Tax / VAT number"><input value={form.taxNumber} onChange={set("taxNumber")} placeholder="e.g. 4123456789" /></Field>
       <Field label="Notes"><textarea rows={3} value={form.notes} onChange={set("notes")} placeholder="How you met, preferences, context…" /></Field>
       <div className="cd-form-actions"><Btn kind="primary" type="submit">Save client</Btn></div>
     </form>
@@ -1529,7 +1533,7 @@ function QuoteDoc({ quote, clients, companyName, settings }) {
     <div className="cd-doc">
       <DocLetterhead companyName={companyName} settings={settings} kind="Quote" number={quote.number} currency={cur} status={quote.status} />
       <div className="cd-doc-grid">
-        <div><span>Prepared for</span><strong>{client?.company || client?.name}</strong>{client?.email && <div className="cd-muted">{client.email}</div>}</div>
+        <div><span>Prepared for</span><strong>{client?.company || client?.name}</strong>{client?.email && <div className="cd-muted">{client.email}</div>}{client?.address && <div className="cd-muted" style={{ whiteSpace: "pre-line" }}>{client.address}</div>}{client?.taxNumber && <div className="cd-muted">Tax No: {client.taxNumber}</div>}</div>
         <div><span>Date</span><strong className="mono">{fmtDate(quote.date)}</strong></div>
         <div><span>Valid until</span><strong className="mono">{fmtDate(quote.validUntil)}</strong></div>
       </div>
@@ -1855,7 +1859,7 @@ function InvoiceDoc({ invoice, clients, allInvoices, companyName, settings }) {
         status={invoice.status}
       />
       <div className="cd-doc-grid">
-        <div><span>Bill to</span><strong>{client?.company || client?.name}</strong>{client?.email && <div className="cd-muted">{client.email}</div>}</div>
+        <div><span>Bill to</span><strong>{client?.company || client?.name}</strong>{client?.email && <div className="cd-muted">{client.email}</div>}{client?.address && <div className="cd-muted" style={{ whiteSpace: "pre-line" }}>{client.address}</div>}{client?.taxNumber && <div className="cd-muted">Tax No: {client.taxNumber}</div>}</div>
         <div><span>Date</span><strong className="mono">{fmtDate(invoice.date)}</strong></div>
         <div><span>{isReceipt ? "Paid" : "Due"}</span><strong className="mono">{fmtDate(isReceipt ? invoice.paidDate : invoice.dueDate)}</strong></div>
       </div>
