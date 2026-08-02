@@ -1007,6 +1007,7 @@ function ProjectsView({ ctx }) {
                 </div>
                 <div className="cd-kv"><span>Rate</span><span className="mono">{fmtMoney(p.hourlyRate, p.currency)}/hr</span></div>
                 <div className="cd-kv"><span>Hours logged</span><span className="mono">{fmtHrs(hrs)}{p.budgetHours ? ` / ${p.budgetHours}h` : ""}</span></div>
+                <div className="cd-kv"><span>Queue priority</span><span className="mono">{p.priority ? `#${p.priority}` : "unset"}</span></div>
                 {p.isRetainer && (
                   <div className="cd-kv"><span>Retainer</span><span className="mono">{fmtMoney(p.retainerAmount, p.currency)}/mo · day {p.retainerDay}</span></div>
                 )}
@@ -1046,7 +1047,7 @@ function ProjectsView({ ctx }) {
 function ProjectForm({ initial, clients, defaultRate, defaultCurrency, onSave }) {
   const [form, setForm] = useState(initial || {
     name: "", clientId: clients[0]?.id || "", status: "active", hourlyRate: defaultRate ?? 100, currency: defaultCurrency || "USD", budgetHours: "", notes: "",
-    isRetainer: false, retainerAmount: "", retainerDay: 1,
+    isRetainer: false, retainerAmount: "", retainerDay: 1, priority: "",
   });
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
   return (
@@ -1058,6 +1059,7 @@ function ProjectForm({ initial, clients, defaultRate, defaultCurrency, onSave })
         budgetHours: form.budgetHours ? Number(form.budgetHours) : "",
         retainerAmount: form.isRetainer ? Number(form.retainerAmount) || 0 : "",
         retainerDay: form.isRetainer ? Number(form.retainerDay) || 1 : "",
+        priority: form.priority === "" ? "" : Number(form.priority),
       });
     }}>
       <Field label="Project name"><input required value={form.name} onChange={set("name")} placeholder="iOS checkout redesign" /></Field>
@@ -1081,7 +1083,10 @@ function ProjectForm({ initial, clients, defaultRate, defaultCurrency, onSave })
         </Field>
         <Field label="Hourly rate"><input type="number" min="0" step="1" value={form.hourlyRate} onChange={set("hourlyRate")} /></Field>
       </div>
-      <Field label="Budget hours (optional)"><input type="number" min="0" step="0.5" value={form.budgetHours} onChange={set("budgetHours")} placeholder="e.g. 80" /></Field>
+      <div className="cd-form-row">
+        <Field label="Budget hours (optional)"><input type="number" min="0" step="0.5" value={form.budgetHours} onChange={set("budgetHours")} placeholder="e.g. 80" /></Field>
+        <Field label="Queue priority (1 = worked first)"><input type="number" min="1" step="1" value={form.priority} onChange={set("priority")} placeholder="unset = last" /></Field>
+      </div>
       <Field label="Notes"><textarea rows={3} value={form.notes} onChange={set("notes")} placeholder="Scope, stack, links…" /></Field>
 
       <div className="cd-subhead" style={{ marginTop: 6 }}>Retainer billing</div>
@@ -1145,6 +1150,9 @@ function ProjectTracker({ project, quotes, projects, updates }) {
   const overallPct = totalHours > 0
     ? Math.round(decks.reduce((s, d) => s + (Number(d.percentComplete) || 0) * (Number(d.hours) || 0), 0) / totalHours)
     : 0;
+  const portfolio = schedulePortfolio(projects.items.map((p) => (p.id === project.id ? { ...p, decks } : p)), todayISO());
+  const queueInfo = portfolio[project.id];
+  const schedule = queueInfo || scheduleProjectDecks(decks, todayISO());
 
   const [updateDate, setUpdateDate] = useState(todayISO());
   const [updatePct, setUpdatePct] = useState("");
@@ -1193,29 +1201,37 @@ function ProjectTracker({ project, quotes, projects, updates }) {
               const hrs = Number(d.hours) || 0;
               const pct = Math.min(100, Math.max(0, Number(d.percentComplete) || 0));
               const barWidthPct = (hrs / maxHours) * 100;
+              const sched = schedule.decks[i];
               return (
-                <div className="cd-gantt-row" key={i}>
-                  <input
-                    className="cd-gantt-desc" value={d.desc} placeholder="Deck description"
-                    onChange={(e) => updateDeckLocal(i, { desc: e.target.value })}
-                    onBlur={() => persistDecks(decks)}
-                  />
-                  <div className="cd-gantt-track">
-                    <div className="cd-gantt-bar" style={{ width: `${barWidthPct}%` }}>
-                      <div className="cd-gantt-fill" style={{ width: `${pct}%` }} />
+                <div className="cd-gantt-item" key={i}>
+                  <div className="cd-gantt-row">
+                    <input
+                      className="cd-gantt-desc" value={d.desc} placeholder="Deck description"
+                      onChange={(e) => updateDeckLocal(i, { desc: e.target.value })}
+                      onBlur={() => persistDecks(decks)}
+                    />
+                    <div className="cd-gantt-track">
+                      <div className="cd-gantt-bar" style={{ width: `${barWidthPct}%` }}>
+                        <div className="cd-gantt-fill" style={{ width: `${pct}%` }} />
+                      </div>
                     </div>
+                    <input
+                      type="number" className="cd-gantt-hours" min="0" step="0.5" value={d.hours}
+                      onChange={(e) => updateDeckLocal(i, { hours: e.target.value })}
+                      onBlur={() => persistDecks(decks)}
+                    />
+                    <input
+                      type="number" className="cd-gantt-pct" min="0" max="100" step="5" value={d.percentComplete}
+                      onChange={(e) => updateDeckLocal(i, { percentComplete: e.target.value })}
+                      onBlur={() => persistDecks(decks)}
+                    />
+                    <button type="button" className="cd-iconbtn danger" onClick={() => removeDeck(i)}><Trash2 size={14} /></button>
                   </div>
-                  <input
-                    type="number" className="cd-gantt-hours" min="0" step="0.5" value={d.hours}
-                    onChange={(e) => updateDeckLocal(i, { hours: e.target.value })}
-                    onBlur={() => persistDecks(decks)}
-                  />
-                  <input
-                    type="number" className="cd-gantt-pct" min="0" max="100" step="5" value={d.percentComplete}
-                    onChange={(e) => updateDeckLocal(i, { percentComplete: e.target.value })}
-                    onBlur={() => persistDecks(decks)}
-                  />
-                  <button type="button" className="cd-iconbtn danger" onClick={() => removeDeck(i)}><Trash2 size={14} /></button>
+                  <div className="cd-gantt-dates">
+                    {sched && sched.remainingHours > 0
+                      ? `Projected: ${fmtDate(sched.startDate)} → ${fmtDate(sched.endDate)} (${sched.remainingHours.toFixed(1)}h remaining)`
+                      : "Complete — no remaining time projected"}
+                  </div>
                 </div>
               );
             })}
@@ -1225,6 +1241,20 @@ function ProjectTracker({ project, quotes, projects, updates }) {
       <button type="button" className="cd-linkbtn" onClick={addDeck}><Plus size={14} /> Add deck</button>
       {decks.length > 0 && (
         <div className="cd-invoice-total">Overall completion: <span className="mono">{overallPct}%</span> <span style={{ fontWeight: 400, fontSize: 12.5, color: "var(--ink-soft)" }}>({totalHours}h quoted total)</span></div>
+      )}
+      {decks.length > 0 && (
+        <div className="cd-hint">
+          {schedule.isComplete
+            ? "All decks are marked complete — nothing left to project."
+            : (
+              <>
+                Projected completion: <strong>{fmtDate(schedule.projectedCompletion)}</strong> — based on 8-hour workdays, Mon–Fri, one project at a time.
+                {queueInfo && queueInfo.queueLength > 1 && (
+                  <> This project is <strong>#{queueInfo.queuePosition} of {queueInfo.queueLength}</strong> in your active queue{queueInfo.queuePosition > 1 ? `, starting ${fmtDate(queueInfo.projectStart)} once higher-priority work is done` : ""}.</>
+                )}
+              </>
+            )}
+        </div>
       )}
 
       <div className="cd-subhead" style={{ marginTop: 18 }}>Project updates</div>
@@ -1257,6 +1287,82 @@ function ProjectTracker({ project, quotes, projects, updates }) {
 }
 
 /* ------------------------------ Overview ------------------------------ */
+/* ---- business-day scheduling: 8 working hours/day, Mon–Fri ---- */
+const WORK_HOURS_PER_DAY = 8;
+function isWeekend(d) { const dow = d.getDay(); return dow === 0 || dow === 6; }
+
+function addBusinessDays(startDateStr, days) {
+  // lands on the Nth business day, counting startDateStr itself as day 1 if it's a weekday
+  let d = new Date(startDateStr + "T00:00:00");
+  if (days <= 0) return d;
+  let added = 0;
+  while (added < days) {
+    if (!isWeekend(d)) {
+      added++;
+      if (added >= days) break;
+    }
+    d.setDate(d.getDate() + 1);
+  }
+  return d;
+}
+
+function nextBusinessDayAfter(dateStr) {
+  const d = new Date(dateStr + "T00:00:00");
+  do { d.setDate(d.getDate() + 1); } while (isWeekend(d));
+  return d.toISOString().slice(0, 10);
+}
+
+// Schedules decks back-to-back starting from startDateStr, using only the
+// hours still remaining on each (quoted hours × (1 − % complete)), at 8
+// business hours/day, skipping weekends.
+function scheduleProjectDecks(decks, startDateStr) {
+  let cursor = startDateStr;
+  let anyRemaining = false;
+  const scheduled = (decks || []).map((d) => {
+    const totalHours = Number(d.hours) || 0;
+    const pct = Math.min(100, Math.max(0, Number(d.percentComplete) || 0));
+    const remainingHours = Math.max(0, totalHours * (1 - pct / 100));
+    if (remainingHours <= 0) {
+      return { ...d, startDate: cursor, endDate: cursor, remainingHours: 0 };
+    }
+    anyRemaining = true;
+    const businessDaysNeeded = Math.max(1, Math.ceil(remainingHours / WORK_HOURS_PER_DAY));
+    const endDate = addBusinessDays(cursor, businessDaysNeeded).toISOString().slice(0, 10);
+    const startDate = cursor;
+    cursor = nextBusinessDayAfter(endDate);
+    return { ...d, startDate, endDate, remainingHours };
+  });
+  const lastActive = [...scheduled].reverse().find((d) => d.remainingHours > 0);
+  const projectedCompletion = lastActive ? lastActive.endDate : (scheduled.length ? scheduled[scheduled.length - 1].endDate : null);
+  return { decks: scheduled, projectedCompletion, isComplete: !anyRemaining };
+}
+
+// Given that only one project can actually be worked on per day, this queues
+// all active projects by priority (lowest number = worked first), and hands
+// each one a start date only once every higher-priority project ahead of it
+// in the queue has finished — then schedules that project's own decks
+// sequentially from there. Returns { [projectId]: { ...scheduleProjectDecks result, projectStart, queuePosition, queueLength } }.
+function schedulePortfolio(allProjects, startDateStr) {
+  const active = (allProjects || []).filter((p) => p.status === "active" && (p.decks || []).length > 0);
+  const sorted = [...active].sort((a, b) => {
+    const pa = a.priority == null || a.priority === "" ? Infinity : Number(a.priority);
+    const pb = b.priority == null || b.priority === "" ? Infinity : Number(b.priority);
+    if (pa !== pb) return pa - pb;
+    return (a.name || "").localeCompare(b.name || "");
+  });
+
+  let cursor = startDateStr;
+  const results = {};
+  sorted.forEach((p, i) => {
+    const sched = scheduleProjectDecks(p.decks || [], cursor);
+    results[p.id] = { ...sched, projectStart: cursor, queuePosition: i + 1, queueLength: sorted.length };
+    if (!sched.isComplete) {
+      cursor = nextBusinessDayAfter(sched.projectedCompletion);
+    }
+  });
+  return results;
+}
+
 function projectCompletion(p, timeEntries) {
   const decks = p.decks || [];
   const totalDeckHours = decks.reduce((s, d) => s + (Number(d.hours) || 0), 0);
@@ -1318,12 +1424,13 @@ function OverviewView({ ctx }) {
           <Empty icon={Layers} title="No projects to show" hint="Adjust the filters above, or create a project to see it here." />
         ) : (
           <div className="cd-portfolio-list">
-            {list.map((p) => {
+            {(() => { const portfolio = schedulePortfolio(projects.items, todayISO()); return list.map((p) => {
               const client = clients.items.find((c) => c.id === p.clientId);
               const decks = p.decks || [];
               const { pct, source } = projectCompletion(p, timeEntries.items);
               const isOpen = !!expanded[p.id];
               const maxDeckHours = Math.max(1, ...decks.map((d) => Number(d.hours) || 0));
+              const schedule = portfolio[p.id] || null;
               return (
                 <div className="cd-portfolio-row" key={p.id}>
                   <button type="button" className="cd-portfolio-summary" onClick={() => toggle(p.id)}>
@@ -1331,7 +1438,11 @@ function OverviewView({ ctx }) {
                       <ChevronRight size={15} style={{ transform: isOpen ? "rotate(90deg)" : "none", transition: "transform .15s", flexShrink: 0, color: "var(--ink-soft)" }} />
                       <div>
                         <div style={{ fontWeight: 700, fontSize: 13.5 }}>{p.name}</div>
-                        <div className="cd-list-sub">{client?.company || client?.name}</div>
+                        <div className="cd-list-sub">
+                          {client?.company || client?.name}
+                          {schedule && !schedule.isComplete && ` · Est. completion: ${fmtDate(schedule.projectedCompletion)}`}
+                          {schedule && schedule.queueLength > 1 && ` · Queue #${schedule.queuePosition} of ${schedule.queueLength}`}
+                        </div>
                       </div>
                     </div>
                     <div className="cd-portfolio-bar-wrap">
@@ -1353,12 +1464,18 @@ function OverviewView({ ctx }) {
                           {decks.map((d, i) => {
                             const dpct = Math.min(100, Math.max(0, Number(d.percentComplete) || 0));
                             const barW = ((Number(d.hours) || 0) / maxDeckHours) * 100;
+                            const sched = schedule?.decks?.[i];
                             return (
-                              <div className="cd-gantt-row" key={i} style={{ gridTemplateColumns: "1.4fr 2fr 60px 50px" }}>
-                                <span style={{ fontSize: 12.5 }}>{d.desc || "—"}</span>
-                                <div className="cd-gantt-track"><div className="cd-gantt-bar" style={{ width: `${barW}%` }}><div className="cd-gantt-fill" style={{ width: `${dpct}%` }} /></div></div>
-                                <span className="mono" style={{ fontSize: 12 }}>{fmtHrs(d.hours)}</span>
-                                <span className="mono" style={{ fontSize: 12 }}>{dpct}%</span>
+                              <div className="cd-gantt-item" key={i}>
+                                <div className="cd-gantt-row" style={{ gridTemplateColumns: "1.4fr 2fr 60px 50px" }}>
+                                  <span style={{ fontSize: 12.5 }}>{d.desc || "—"}</span>
+                                  <div className="cd-gantt-track"><div className="cd-gantt-bar" style={{ width: `${barW}%` }}><div className="cd-gantt-fill" style={{ width: `${dpct}%` }} /></div></div>
+                                  <span className="mono" style={{ fontSize: 12 }}>{fmtHrs(d.hours)}</span>
+                                  <span className="mono" style={{ fontSize: 12 }}>{dpct}%</span>
+                                </div>
+                                <div className="cd-gantt-dates">
+                                  {sched && sched.remainingHours > 0 ? `Projected: ${fmtDate(sched.startDate)} → ${fmtDate(sched.endDate)}` : "Complete"}
+                                </div>
                               </div>
                             );
                           })}
@@ -1368,7 +1485,7 @@ function OverviewView({ ctx }) {
                   )}
                 </div>
               );
-            })}
+            }); })()}
           </div>
         )}
       </div>
@@ -3008,7 +3125,9 @@ const CSS = `
 .cd-bar-fill{height:100%;background:var(--accent);}
 
 .cd-gantt-header{display:grid;grid-template-columns:1.4fr 2fr 70px 60px 28px;gap:8px;font-size:10.5px;text-transform:uppercase;letter-spacing:0.6px;color:var(--ink-soft);font-weight:700;padding:0 2px;}
-.cd-gantt{display:flex;flex-direction:column;gap:8px;}
+.cd-gantt{display:flex;flex-direction:column;gap:12px;}
+.cd-gantt-item{display:flex;flex-direction:column;gap:3px;}
+.cd-gantt-dates{font-size:11px;color:var(--ink-soft);padding-left:2px;}
 .cd-gantt-row{display:grid;grid-template-columns:1.4fr 2fr 70px 60px 28px;gap:8px;align-items:center;}
 .cd-gantt-desc{font-size:12.5px;border:1px solid var(--border);border-radius:7px;padding:6px 8px;font-family:var(--font-body);color:var(--ink);background:var(--surface);}
 .cd-gantt-track{height:16px;background:var(--surface-2);border-radius:5px;overflow:hidden;}
