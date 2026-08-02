@@ -1019,7 +1019,8 @@ function ProjectsView({ ctx }) {
                 </div>
                 <div className="cd-kv"><span>Rate</span><span className="mono">{fmtMoney(p.hourlyRate, p.currency)}/hr</span></div>
                 <div className="cd-kv"><span>Hours logged</span><span className="mono">{fmtHrs(hrs)}{p.budgetHours ? ` / ${p.budgetHours}h` : ""}</span></div>
-                <div className="cd-kv"><span>Queue priority</span><span className="mono">{p.priority ? `#${p.priority}` : "unset"}</span></div>
+                <div className="cd-kv"><span>Priority</span><span className="mono">{p.priority ? `#${p.priority}` : "unset"}</span></div>
+                <div className="cd-kv"><span>Start date</span><span className="mono">{p.startDate ? fmtDate(p.startDate) : "unset"}</span></div>
                 {p.isRetainer && (
                   <div className="cd-kv"><span>Retainer</span><span className="mono">{fmtMoney(p.retainerAmount, p.currency)}/mo · day {p.retainerDay}</span></div>
                 )}
@@ -1059,7 +1060,7 @@ function ProjectsView({ ctx }) {
 function ProjectForm({ initial, clients, defaultRate, defaultCurrency, onSave }) {
   const [form, setForm] = useState(initial || {
     name: "", clientId: clients[0]?.id || "", status: "active", hourlyRate: defaultRate ?? 100, currency: defaultCurrency || "USD", budgetHours: "", notes: "",
-    isRetainer: false, retainerAmount: "", retainerDay: 1, priority: "",
+    isRetainer: false, retainerAmount: "", retainerDay: 1, priority: "", startDate: todayISO(),
   });
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
   return (
@@ -1097,7 +1098,8 @@ function ProjectForm({ initial, clients, defaultRate, defaultCurrency, onSave })
       </div>
       <div className="cd-form-row">
         <Field label="Budget hours (optional)"><input type="number" min="0" step="0.5" value={form.budgetHours} onChange={set("budgetHours")} placeholder="e.g. 80" /></Field>
-        <Field label="Queue priority (1 = worked first)"><input type="number" min="1" step="1" value={form.priority} onChange={set("priority")} placeholder="unset = last" /></Field>
+        <Field label="Priority (for ordering, optional)"><input type="number" min="1" step="1" value={form.priority} onChange={set("priority")} placeholder="unset = last" /></Field>
+        <Field label="Start date"><input type="date" value={form.startDate} onChange={set("startDate")} /></Field>
       </div>
       <Field label="Notes"><textarea rows={3} value={form.notes} onChange={set("notes")} placeholder="Scope, stack, links…" /></Field>
 
@@ -1162,9 +1164,8 @@ function ProjectTracker({ project, quotes, projects, updates }) {
   const overallPct = totalHours > 0
     ? Math.round(decks.reduce((s, d) => s + (Number(d.percentComplete) || 0) * (Number(d.hours) || 0), 0) / totalHours)
     : 0;
-  const portfolio = schedulePortfolio(projects.items.map((p) => (p.id === project.id ? { ...p, decks } : p)), todayISO());
-  const queueInfo = portfolio[project.id];
-  const schedule = queueInfo || scheduleProjectDecks(decks, todayISO());
+  const projectStartDate = project.startDate || todayISO();
+  const schedule = scheduleProjectDecks(decks, projectStartDate);
 
   const [updateDate, setUpdateDate] = useState(todayISO());
   const [updatePct, setUpdatePct] = useState("");
@@ -1199,6 +1200,12 @@ function ProjectTracker({ project, quotes, projects, updates }) {
           </div>
         </div>
       )}
+
+      <div className="cd-form-row" style={{ maxWidth: 260 }}>
+        <Field label="Project start date">
+          <input type="date" value={projectStartDate} onChange={(e) => projects.update(project.id, { startDate: e.target.value })} />
+        </Field>
+      </div>
 
       <div className="cd-subhead">Gantt — decks quoted on</div>
       {decks.length === 0 ? (
@@ -1258,14 +1265,7 @@ function ProjectTracker({ project, quotes, projects, updates }) {
         <div className="cd-hint">
           {schedule.isComplete
             ? "All decks are marked complete — nothing left to project."
-            : (
-              <>
-                Projected completion: <strong>{fmtDate(schedule.projectedCompletion)}</strong> — based on 8-hour workdays, Mon–Fri, one project at a time.
-                {queueInfo && queueInfo.queueLength > 1 && (
-                  <> This project is <strong>#{queueInfo.queuePosition} of {queueInfo.queueLength}</strong> in your active queue{queueInfo.queuePosition > 1 ? `, starting ${fmtDate(queueInfo.projectStart)} once higher-priority work is done` : ""}.</>
-                )}
-              </>
-            )}
+            : <>Starting <strong>{fmtDate(projectStartDate)}</strong>, projected completion: <strong>{fmtDate(schedule.projectedCompletion)}</strong> — based on 8-hour workdays, Mon–Fri, working on this project's outstanding hours.</>}
         </div>
       )}
 
@@ -1355,32 +1355,6 @@ function scheduleProjectDecks(decks, startDateStr) {
   return { decks: scheduled, projectedCompletion, isComplete: !anyRemaining };
 }
 
-// Given that only one project can actually be worked on per day, this queues
-// all active projects by priority (lowest number = worked first), and hands
-// each one a start date only once every higher-priority project ahead of it
-// in the queue has finished — then schedules that project's own decks
-// sequentially from there. Returns { [projectId]: { ...scheduleProjectDecks result, projectStart, queuePosition, queueLength } }.
-function schedulePortfolio(allProjects, startDateStr) {
-  const active = (allProjects || []).filter((p) => p.status === "active" && (p.decks || []).length > 0);
-  const sorted = [...active].sort((a, b) => {
-    const pa = a.priority == null || a.priority === "" ? Infinity : Number(a.priority);
-    const pb = b.priority == null || b.priority === "" ? Infinity : Number(b.priority);
-    if (pa !== pb) return pa - pb;
-    return (a.name || "").localeCompare(b.name || "");
-  });
-
-  let cursor = snapToBusinessDay(startDateStr);
-  const results = {};
-  sorted.forEach((p, i) => {
-    const sched = scheduleProjectDecks(p.decks || [], cursor);
-    results[p.id] = { ...sched, projectStart: cursor, queuePosition: i + 1, queueLength: sorted.length };
-    if (!sched.isComplete) {
-      cursor = nextBusinessDayAfter(sched.projectedCompletion);
-    }
-  });
-  return results;
-}
-
 function projectCompletion(p, timeEntries) {
   const decks = p.decks || [];
   const totalDeckHours = decks.reduce((s, d) => s + (Number(d.hours) || 0), 0);
@@ -1404,7 +1378,12 @@ function OverviewView({ ctx }) {
   const list = projects.items.filter((p) =>
     (statusFilter === "all" || p.status === statusFilter) &&
     (clientFilter === "all" || p.clientId === clientFilter)
-  );
+  ).sort((a, b) => {
+    const pa = a.priority == null || a.priority === "" ? Infinity : Number(a.priority);
+    const pb = b.priority == null || b.priority === "" ? Infinity : Number(b.priority);
+    if (pa !== pb) return pa - pb;
+    return (a.name || "").localeCompare(b.name || "");
+  });
 
   const toggle = (id) => setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
 
@@ -1442,13 +1421,13 @@ function OverviewView({ ctx }) {
           <Empty icon={Layers} title="No projects to show" hint="Adjust the filters above, or create a project to see it here." />
         ) : (
           <div className="cd-portfolio-list">
-            {(() => { const portfolio = schedulePortfolio(projects.items, todayISO()); return list.map((p) => {
+            {list.map((p) => {
               const client = clients.items.find((c) => c.id === p.clientId);
               const decks = p.decks || [];
               const { pct, source } = projectCompletion(p, timeEntries.items);
               const isOpen = !!expanded[p.id];
               const maxDeckHours = Math.max(1, ...decks.map((d) => Number(d.hours) || 0));
-              const schedule = portfolio[p.id] || null;
+              const schedule = decks.length > 0 ? scheduleProjectDecks(decks, p.startDate || todayISO()) : null;
               return (
                 <div className="cd-portfolio-row" key={p.id}>
                   <button type="button" className="cd-portfolio-summary" onClick={() => toggle(p.id)}>
@@ -1458,8 +1437,8 @@ function OverviewView({ ctx }) {
                         <div style={{ fontWeight: 700, fontSize: 13.5 }}>{p.name}</div>
                         <div className="cd-list-sub">
                           {client?.company || client?.name}
+                          {p.startDate && ` · Starts: ${fmtDate(p.startDate)}`}
                           {schedule && !schedule.isComplete && ` · Est. completion: ${fmtDate(schedule.projectedCompletion)}`}
-                          {schedule && schedule.queueLength > 1 && ` · Queue #${schedule.queuePosition} of ${schedule.queueLength}`}
                         </div>
                       </div>
                     </div>
@@ -1503,7 +1482,7 @@ function OverviewView({ ctx }) {
                   )}
                 </div>
               );
-            }); })()}
+            })}
           </div>
         )}
       </div>
