@@ -206,8 +206,8 @@ function useTimer() {
     return () => clearInterval(id);
   }, [timer]);
 
-  const start = useCallback((projectId, description) => {
-    const t = { projectId, description: description || "", startedAt: new Date().toISOString() };
+  const start = useCallback((projectId, description, deckDesc) => {
+    const t = { projectId, description: description || "", deckDesc: deckDesc || "", startedAt: new Date().toISOString() };
     setTimer(t);
     localStorage.setItem("cd_activeTimer", JSON.stringify(t));
   }, []);
@@ -317,6 +317,31 @@ const fmtDate = (iso) => {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 };
 const fmtHrs = (n) => `${(Number(n) || 0).toFixed(2)}h`;
+
+// Logs a time entry and, if it's tagged to a specific deck, recalculates that
+// deck's % complete from total logged hours against it — so the Gantt chart
+// stays in sync automatically as work gets logged.
+async function logTimeEntry(entry, ctx) {
+  const { timeEntries, projects } = ctx;
+  const saved = await timeEntries.add(entry);
+  if (saved && saved.deckDesc && saved.projectId) {
+    const project = projects.items.find((p) => p.id === saved.projectId);
+    const deckIdx = project?.decks?.findIndex((d) => d.desc === saved.deckDesc);
+    if (project && deckIdx > -1) {
+      const deck = project.decks[deckIdx];
+      const deckHours = Number(deck.hours) || 0;
+      if (deckHours > 0) {
+        const totalLogged = [...timeEntries.items, saved]
+          .filter((t) => t.projectId === project.id && t.deckDesc === saved.deckDesc)
+          .reduce((s, t) => s + Number(t.hours || 0), 0);
+        const newPct = Math.min(100, Math.round((totalLogged / deckHours) * 100));
+        const newDecks = project.decks.map((d, i) => i === deckIdx ? { ...d, percentComplete: newPct } : d);
+        await projects.update(project.id, { decks: newDecks });
+      }
+    }
+  }
+  return saved;
+}
 const monthLabel = (ym) => new Date(ym + "-01T00:00:00").toLocaleDateString(undefined, { month: "long", year: "numeric" });
 const monthLabelShort = (ym) => new Date(ym + "-01T00:00:00").toLocaleDateString(undefined, { month: "short", year: "numeric" });
 
@@ -671,7 +696,7 @@ function Dashboard({ ctx, goTo }) {
 
       {logging && (
         <Modal title="Log time" onClose={() => setLogging(false)}>
-          <TimeForm initial={null} projects={projects.items} onSave={(form) => { timeEntries.add(form); setLogging(false); }} />
+          <TimeForm initial={null} projects={projects.items} onSave={(form) => { logTimeEntry(form, ctx); setLogging(false); }} />
         </Modal>
       )}
     </div>
@@ -1268,14 +1293,14 @@ function TimeView({ ctx }) {
 
   const save = (form) => {
     if (form.id) timeEntries.update(form.id, form);
-    else timeEntries.add(form);
+    else logTimeEntry(form, ctx);
     setEditing(null);
   };
 
   const lastEntry = [...timeEntries.items].sort((a, b) => (b.date + b.createdAt).localeCompare(a.date + a.createdAt))[0];
   const repeatLast = () => {
     if (!lastEntry) return;
-    timeEntries.add({ projectId: lastEntry.projectId, date: todayISO(), hours: lastEntry.hours, description: lastEntry.description, billed: false });
+    logTimeEntry({ projectId: lastEntry.projectId, date: todayISO(), hours: lastEntry.hours, description: lastEntry.description, deckDesc: lastEntry.deckDesc || "", billed: false }, ctx);
   };
 
   return (
@@ -1295,7 +1320,7 @@ function TimeView({ ctx }) {
         <Empty icon={Clock} title="No projects to log against" hint="Create a project first, then log hours here." />
       ) : (
         <>
-          <TimerCard projects={projects.items} onLog={(entry) => timeEntries.add(entry)} />
+          <TimerCard projects={projects.items} onLog={(entry) => logTimeEntry(entry, ctx)} />
 
           <div className="cd-searchbar">
             <select value={projectFilter} onChange={(e) => setProjectFilter(e.target.value)}>
@@ -1349,6 +1374,7 @@ function TimeView({ ctx }) {
 function TimerCard({ projects, onLog }) {
   const timerHook = useTimer();
   const [projectId, setProjectId] = useState(projects[0]?.id || "");
+  const [deckDesc, setDeckDesc] = useState("");
   const [description, setDescription] = useState("");
 
   if (!timerHook.ready) return null;
@@ -1363,11 +1389,16 @@ function TimerCard({ projects, onLog }) {
 
   const stop = () => {
     const hours = Math.max(0.01, Math.round((timerHook.elapsedMs / 3600000) * 100) / 100);
-    onLog({ projectId: timerHook.timer.projectId, date: todayISO(), hours, description: timerHook.timer.description, billed: false });
+    onLog({
+      projectId: timerHook.timer.projectId, date: todayISO(), hours,
+      description: timerHook.timer.description, deckDesc: timerHook.timer.deckDesc || "", billed: false,
+    });
     timerHook.clear();
   };
 
   const activeProject = timerHook.timer ? projects.find((p) => p.id === timerHook.timer.projectId) : null;
+  const selectedProject = projects.find((p) => p.id === projectId);
+  const deckOptions = (selectedProject?.decks || []).filter((d) => d.desc);
 
   return (
     <section className="cd-card cd-timer-card">
@@ -1375,16 +1406,26 @@ function TimerCard({ projects, onLog }) {
       {timerHook.timer ? (
         <div className="cd-timer-active">
           <div className="cd-timer-clock mono">{fmtElapsed(timerHook.elapsedMs)}</div>
-          <div className="cd-timer-meta">{activeProject?.name || "—"}{timerHook.timer.description ? ` — ${timerHook.timer.description}` : ""}</div>
+          <div className="cd-timer-meta">
+            {activeProject?.name || "—"}
+            {timerHook.timer.deckDesc ? ` — ${timerHook.timer.deckDesc}` : ""}
+            {timerHook.timer.description ? ` · ${timerHook.timer.description}` : ""}
+          </div>
           <Btn kind="primary" icon={Pause} onClick={stop}>Stop &amp; log</Btn>
         </div>
       ) : (
         <div className="cd-timer-idle">
-          <select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
+          <select value={projectId} onChange={(e) => { setProjectId(e.target.value); setDeckDesc(""); }}>
             {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
+          {deckOptions.length > 0 && (
+            <select value={deckDesc} onChange={(e) => setDeckDesc(e.target.value)}>
+              <option value="">No specific deck</option>
+              {deckOptions.map((d, i) => <option key={i} value={d.desc}>{d.desc}</option>)}
+            </select>
+          )}
           <input placeholder="What are you working on?" value={description} onChange={(e) => setDescription(e.target.value)} />
-          <Btn kind="primary" icon={Play} onClick={() => timerHook.start(projectId, description)} disabled={!projectId}>Start</Btn>
+          <Btn kind="primary" icon={Play} onClick={() => timerHook.start(projectId, description, deckDesc)} disabled={!projectId}>Start</Btn>
         </div>
       )}
     </section>
@@ -1393,16 +1434,26 @@ function TimerCard({ projects, onLog }) {
 
 function TimeForm({ initial, projects, onSave }) {
   const [form, setForm] = useState(initial || {
-    projectId: projects[0]?.id || "", date: todayISO(), hours: "", description: "", billed: false,
+    projectId: projects[0]?.id || "", date: todayISO(), hours: "", description: "", deckDesc: "", billed: false,
   });
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+  const selectedProject = projects.find((p) => p.id === form.projectId);
+  const deckOptions = (selectedProject?.decks || []).filter((d) => d.desc);
   return (
     <form className="cd-form" onSubmit={(e) => { e.preventDefault(); onSave({ ...form, hours: Number(form.hours) || 0 }); }}>
       <Field label="Project">
-        <select required value={form.projectId} onChange={set("projectId")}>
+        <select required value={form.projectId} onChange={(e) => setForm({ ...form, projectId: e.target.value, deckDesc: "" })}>
           {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
         </select>
       </Field>
+      {deckOptions.length > 0 && (
+        <Field label="Deck (optional)">
+          <select value={form.deckDesc} onChange={set("deckDesc")}>
+            <option value="">No specific deck</option>
+            {deckOptions.map((d, i) => <option key={i} value={d.desc}>{d.desc}</option>)}
+          </select>
+        </Field>
+      )}
       <div className="cd-form-row">
         <Field label="Date"><input type="date" required value={form.date} onChange={set("date")} /></Field>
         <Field label="Hours"><input type="number" min="0" step="0.25" required value={form.hours} onChange={set("hours")} placeholder="2.5" /></Field>
@@ -1500,7 +1551,7 @@ function ScheduleView({ ctx }) {
               date: loggingFor.date, hours: "", description: loggingFor.title, meetingId: loggingFor.id, billed: false,
             }}
             projects={projects.items.filter((p) => p.clientId === loggingFor.clientId)}
-            onSave={(form) => { timeEntries.add(form); setLoggingFor(null); }}
+            onSave={(form) => { logTimeEntry(form, ctx); setLoggingFor(null); }}
           />
         </Modal>
       )}
