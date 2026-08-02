@@ -387,6 +387,29 @@ async function updateTimeEntryAndSync(id, patch, ctx) {
 
   return after;
 }
+
+// Same idea again, for deleting an entry — recalculates whichever deck it
+// was tagged to, based on what's left once it's gone.
+async function removeTimeEntryAndSync(id, ctx) {
+  const { timeEntries, projects } = ctx;
+  const before = timeEntries.items.find((t) => t.id === id);
+  await timeEntries.remove(id);
+  if (before && before.projectId && before.deckDesc) {
+    const project = projects.items.find((p) => p.id === before.projectId);
+    const deckIdx = project?.decks?.findIndex((d) => d.desc === before.deckDesc);
+    if (project && deckIdx > -1) {
+      const deck = project.decks[deckIdx];
+      const deckHours = Number(deck.hours) || 0;
+      if (deckHours > 0) {
+        const remaining = timeEntries.items.filter((t) => t.id !== id && t.projectId === project.id && t.deckDesc === before.deckDesc);
+        const totalLogged = remaining.reduce((s, t) => s + Number(t.hours || 0), 0);
+        const newPct = Math.min(100, Math.round((totalLogged / deckHours) * 1000) / 10);
+        const newDecks = project.decks.map((d, i) => i === deckIdx ? { ...d, percentComplete: newPct } : d);
+        await projects.update(project.id, { decks: newDecks });
+      }
+    }
+  }
+}
 const monthLabel = (ym) => new Date(ym + "-01T00:00:00").toLocaleDateString(undefined, { month: "long", year: "numeric" });
 const monthLabelShort = (ym) => new Date(ym + "-01T00:00:00").toLocaleDateString(undefined, { month: "short", year: "numeric" });
 
@@ -1430,7 +1453,7 @@ function TimeView({ ctx }) {
                       <td>
                         <div className="cd-row-actions">
                           <button className="cd-iconbtn" onClick={() => setEditing(t)}><Pencil size={14} /></button>
-                          <button className="cd-iconbtn danger" onClick={() => timeEntries.remove(t.id)}><Trash2 size={14} /></button>
+                          <button className="cd-iconbtn danger" onClick={() => removeTimeEntryAndSync(t.id, ctx)}><Trash2 size={14} /></button>
                         </div>
                       </td>
                     </tr>
