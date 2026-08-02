@@ -303,7 +303,19 @@ const useSettings = () => useSupabaseSettings();
 --------------------------------------------------------------------- */
 
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
-const todayISO = () => new Date().toISOString().slice(0, 10);
+const todayISO = () => {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+};
+const dateToISO = (d) => {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+};
 const CURRENCIES = {
   USD: { symbol: "$", label: "US$ — US Dollar" },
   ZAR: { symbol: "R", label: "R — South African Rand" },
@@ -481,7 +493,7 @@ function App() {
           clientId: p.clientId,
           currency: p.currency || "USD",
           date: today,
-          dueDate: (() => { const d = new Date(); d.setDate(d.getDate() + 14); return d.toISOString().slice(0, 10); })(),
+          dueDate: (() => { const d = new Date(); d.setDate(d.getDate() + 14); return dateToISO(d); })(),
           lineItems: [{ desc: `Monthly retainer — ${p.name} (${monthLabel(monthKey)})`, amount: Number(p.retainerAmount) || 0 }],
           status: "draft",
           number: nextInvoiceNumber([...invoices.items, ...newRetainer], settingsHook.settings.invoicePrefix),
@@ -638,12 +650,12 @@ function Dashboard({ ctx, goTo }) {
   const weekStart = new Date(now); weekStart.setDate(now.getDate() - now.getDay());
   const days = Array.from({ length: 7 }, (_, i) => {
     const d = new Date(weekStart); d.setDate(weekStart.getDate() + i);
-    return d.toISOString().slice(0, 10);
+    return dateToISO(d);
   });
   const hoursByDay = days.map((iso) => timeEntries.items.filter((t) => t.date === iso).reduce((s, t) => s + Number(t.hours || 0), 0));
   const maxHrs = Math.max(4, ...hoursByDay);
 
-  const weekStartIso = weekStart.toISOString().slice(0, 10);
+  const weekStartIso = dateToISO(weekStart);
   const personalWeekHours = personalTime.items.filter((t) => t.date >= weekStartIso).reduce((s, t) => s + Number(t.hours || 0), 0);
   const recentPersonal = [...personalTime.items].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
 
@@ -1309,14 +1321,20 @@ function addBusinessDays(startDateStr, days) {
 function nextBusinessDayAfter(dateStr) {
   const d = new Date(dateStr + "T00:00:00");
   do { d.setDate(d.getDate() + 1); } while (isWeekend(d));
-  return d.toISOString().slice(0, 10);
+  return dateToISO(d);
+}
+
+function snapToBusinessDay(dateStr) {
+  const d = new Date(dateStr + "T00:00:00");
+  while (isWeekend(d)) d.setDate(d.getDate() + 1);
+  return dateToISO(d);
 }
 
 // Schedules decks back-to-back starting from startDateStr, using only the
 // hours still remaining on each (quoted hours × (1 − % complete)), at 8
 // business hours/day, skipping weekends.
 function scheduleProjectDecks(decks, startDateStr) {
-  let cursor = startDateStr;
+  let cursor = snapToBusinessDay(startDateStr);
   let anyRemaining = false;
   const scheduled = (decks || []).map((d) => {
     const totalHours = Number(d.hours) || 0;
@@ -1327,7 +1345,7 @@ function scheduleProjectDecks(decks, startDateStr) {
     }
     anyRemaining = true;
     const businessDaysNeeded = Math.max(1, Math.ceil(remainingHours / WORK_HOURS_PER_DAY));
-    const endDate = addBusinessDays(cursor, businessDaysNeeded).toISOString().slice(0, 10);
+    const endDate = dateToISO(addBusinessDays(cursor, businessDaysNeeded));
     const startDate = cursor;
     cursor = nextBusinessDayAfter(endDate);
     return { ...d, startDate, endDate, remainingHours };
@@ -1351,7 +1369,7 @@ function schedulePortfolio(allProjects, startDateStr) {
     return (a.name || "").localeCompare(b.name || "");
   });
 
-  let cursor = startDateStr;
+  let cursor = snapToBusinessDay(startDateStr);
   const results = {};
   sorted.forEach((p, i) => {
     const sched = scheduleProjectDecks(p.decks || [], cursor);
@@ -1691,7 +1709,7 @@ function PersonalTimeSection({ ctx }) {
   const [editing, setEditing] = useState(null);
 
   const list = [...personalTime.items].sort((a, b) => b.date.localeCompare(a.date));
-  const weekStart = (() => { const d = new Date(); d.setDate(d.getDate() - d.getDay()); return d.toISOString().slice(0, 10); })();
+  const weekStart = (() => { const d = new Date(); d.setDate(d.getDate() - d.getDay()); return dateToISO(d); })();
   const weekHours = personalTime.items.filter((t) => t.date >= weekStart).reduce((s, t) => s + Number(t.hours || 0), 0);
   const totalHours = personalTime.items.reduce((s, t) => s + Number(t.hours || 0), 0);
 
@@ -2102,7 +2120,7 @@ function QuoteForm({ initial, clients, settings, onSave }) {
   const [currency, setCurrency] = useState(initial?.currency || settings?.defaultCurrency || "USD");
   const [date, setDate] = useState(initial?.date || todayISO());
   const [validUntil, setValidUntil] = useState(initial?.validUntil || (() => {
-    const d = new Date(); d.setDate(d.getDate() + 30); return d.toISOString().slice(0, 10);
+    const d = new Date(); d.setDate(d.getDate() + 30); return dateToISO(d);
   })());
   const [taxRate, setTaxRate] = useState(initial?.taxRate ?? settings?.defaultTaxRate ?? 0);
   const [notes, setNotes] = useState(initial?.notes || "");
@@ -2399,7 +2417,7 @@ function InvoiceForm({ clients, projects, timeEntries, invoices, settings, onSav
   const [manualItems, setManualItems] = useState([]); // {desc, amount}
   const [date, setDate] = useState(todayISO());
   const [dueDate, setDueDate] = useState(() => {
-    const d = new Date(); d.setDate(d.getDate() + 14); return d.toISOString().slice(0, 10);
+    const d = new Date(); d.setDate(d.getDate() + 14); return dateToISO(d);
   });
   const [taxRate, setTaxRate] = useState(settings?.defaultTaxRate || 0);
 
