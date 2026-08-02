@@ -983,6 +983,13 @@ function ProjectForm({ initial, clients, defaultRate, defaultCurrency, onSave })
 function ProjectTracker({ project, quotes, projects, updates }) {
   const [decks, setDecks] = useState(project.decks || []);
   const linkedQuote = quotes.find((q) => q.id === project.quoteId);
+  const [linkQuoteId, setLinkQuoteId] = useState("");
+  const linkableQuotes = quotes.filter((q) => q.clientId === project.clientId);
+
+  const linkQuote = () => {
+    if (!linkQuoteId) return;
+    projects.update(project.id, { quoteId: linkQuoteId });
+  };
 
   const persistDecks = (next) => projects.update(project.id, { decks: next });
   const updateDeckLocal = (i, patch) => setDecks(decks.map((d, idx) => idx === i ? { ...d, ...patch } : d));
@@ -993,6 +1000,20 @@ function ProjectTracker({ project, quotes, projects, updates }) {
   };
   const removeDeck = (i) => {
     const next = decks.filter((_, idx) => idx !== i);
+    setDecks(next);
+    persistDecks(next);
+  };
+
+  const recalcFromQuote = () => {
+    if (!linkedQuote) return;
+    const rate = Number(project.hourlyRate) || Number(linkedQuote.lineItems?.[0]?.rate) || 1;
+    const next = (linkedQuote.lineItems || []).map((li) => {
+      const hrs = Number(li.hours) || 0;
+      const derivedHours = hrs > 0 ? hrs : Math.round((Number(li.amount || 0) / rate) * 100) / 100;
+      // keep any progress already logged against a deck with the same name
+      const existing = decks.find((d) => d.desc === li.desc);
+      return { desc: li.desc, hours: derivedHours, percentComplete: existing ? Number(existing.percentComplete) || 0 : 0 };
+    });
     setDecks(next);
     persistDecks(next);
   };
@@ -1018,7 +1039,24 @@ function ProjectTracker({ project, quotes, projects, updates }) {
 
   return (
     <div className="cd-form">
-      {linkedQuote && <div className="cd-hint">Linked quote: <strong className="mono">{linkedQuote.number}</strong></div>}
+      {linkedQuote && (
+        <div className="cd-hint" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+          <span>Linked quote: <strong className="mono">{linkedQuote.number}</strong></span>
+          <Btn icon={Repeat} onClick={recalcFromQuote}>Recalculate deck hours from quote</Btn>
+        </div>
+      )}
+      {!linkedQuote && linkableQuotes.length > 0 && (
+        <div className="cd-hint">
+          <div style={{ marginBottom: 8 }}>This project isn't linked to a quote yet — link one to pull in its decks automatically.</div>
+          <div className="cd-form-row">
+            <select value={linkQuoteId} onChange={(e) => setLinkQuoteId(e.target.value)}>
+              <option value="">Select a quote…</option>
+              {linkableQuotes.map((q) => <option key={q.id} value={q.id}>{q.number}</option>)}
+            </select>
+            <Btn kind="primary" onClick={linkQuote} disabled={!linkQuoteId}>Link quote</Btn>
+          </div>
+        </div>
+      )}
 
       <div className="cd-subhead">Gantt — decks quoted on</div>
       {decks.length === 0 ? (
@@ -1452,19 +1490,30 @@ function QuotesView({ ctx }) {
   const setStatus = (q, status) => quotes.update(q.id, { status });
 
   const convertToProject = async (q) => {
-    const totalHours = (q.lineItems || []).reduce((s, li) => s + Number(li.hours || 0), 0);
+    const hourlyLineHours = (q.lineItems || []).reduce((s, li) => s + Number(li.hours || 0), 0);
     const subtotal = quoteSubtotal(q);
-    const blendedRate = totalHours > 0
-      ? Math.round((subtotal / totalHours) * 100) / 100
+    const blendedRate = hourlyLineHours > 0
+      ? Math.round((subtotal / hourlyLineHours) * 100) / 100
       : Number(q.lineItems?.[0]?.rate || settings.settings.defaultHourlyRate || 0);
+    const effectiveRate = blendedRate || Number(settings.settings.defaultHourlyRate) || 1;
     const client = clients.items.find((c) => c.id === q.clientId);
     const summary = (q.lineItems || []).map((li) => `• ${li.desc}${li.hours ? ` (${fmtHrs(li.hours)})` : ""} — ${fmtMoney(li.amount, q.currency)}`).join("\n");
+
+    // For any line item quoted as a flat amount (no hours entered), derive an
+    // equivalent duration in hours by dividing that amount by the effective rate —
+    // so the Gantt chart still gets a meaningful duration to show.
+    const decks = (q.lineItems || []).map((li) => {
+      const hrs = Number(li.hours) || 0;
+      const derivedHours = hrs > 0 ? hrs : Math.round((Number(li.amount || 0) / effectiveRate) * 100) / 100;
+      return { desc: li.desc, hours: derivedHours, percentComplete: 0 };
+    });
+    const totalHours = decks.reduce((s, d) => s + (Number(d.hours) || 0), 0);
 
     const newProject = await projects.add({
       clientId: q.clientId,
       name: `${client?.company || client?.name || "New client"} — ${q.number}`,
       status: "active",
-      hourlyRate: blendedRate,
+      hourlyRate: effectiveRate,
       currency: q.currency || "USD",
       budgetHours: totalHours || "",
       notes: `Converted from quote ${q.number}.\n${summary}`,
@@ -1472,7 +1521,7 @@ function QuotesView({ ctx }) {
       retainerAmount: "",
       retainerDay: "",
       quoteId: q.id,
-      decks: (q.lineItems || []).map((li) => ({ desc: li.desc, hours: Number(li.hours) || 0, percentComplete: 0 })),
+      decks,
     });
 
     if (newProject) {
