@@ -353,10 +353,11 @@ function App() {
   const comms = useCollection("comms");
   const expenses = useCollection("expenses");
   const quotes = useCollection("quotes");
+  const projectUpdates = useCollection("project_updates");
   const settingsHook = useSettings();
 
-  const ctx = { clients, projects, timeEntries, meetings, invoices, clientNotes, comms, expenses, quotes, settings: settingsHook };
-  const loading = !clients.ready || !projects.ready || !timeEntries.ready || !meetings.ready || !invoices.ready || !clientNotes.ready || !comms.ready || !expenses.ready || !quotes.ready || !settingsHook.ready;
+  const ctx = { clients, projects, timeEntries, meetings, invoices, clientNotes, comms, expenses, quotes, projectUpdates, settings: settingsHook };
+  const loading = !clients.ready || !projects.ready || !timeEntries.ready || !meetings.ready || !invoices.ready || !clientNotes.ready || !comms.ready || !expenses.ready || !quotes.ready || !projectUpdates.ready || !settingsHook.ready;
 
   // Automations: run once per session after data loads — flip overdue invoices,
   // and generate draft retainer invoices for active retainer projects that are due.
@@ -832,8 +833,9 @@ function ClientForm({ initial, onSave }) {
 
 /* ------------------------------ Projects ------------------------------ */
 function ProjectsView({ ctx }) {
-  const { clients, projects, timeEntries, settings } = ctx;
+  const { clients, projects, timeEntries, quotes, projectUpdates, settings } = ctx;
   const [editing, setEditing] = useState(null);
+  const [tracking, setTracking] = useState(null); // project being tracked
   const [filter, setFilter] = useState("all");
 
   const list = projects.items.filter((p) => filter === "all" || p.status === filter);
@@ -890,6 +892,9 @@ function ProjectsView({ ctx }) {
                   <div className="cd-bar"><div className="cd-bar-fill" style={{ width: `${pct}%` }} /></div>
                 )}
                 {p.notes && <div className="cd-notes">{p.notes}</div>}
+                <div className="cd-form-actions" style={{ marginTop: 10 }}>
+                  <Btn icon={BarChart3} onClick={() => setTracking(p)}>Tracker &amp; Gantt</Btn>
+                </div>
               </div>
             );
           })}
@@ -899,6 +904,17 @@ function ProjectsView({ ctx }) {
       {editing && (
         <Modal title={editing === "new" ? "New project" : "Edit project"} onClose={() => setEditing(null)}>
           <ProjectForm initial={editing === "new" ? null : editing} clients={clients.items} defaultRate={settings.settings.defaultHourlyRate} defaultCurrency={settings.settings.defaultCurrency} onSave={save} />
+        </Modal>
+      )}
+
+      {tracking && (
+        <Modal title={`${tracking.name} — Tracker`} onClose={() => setTracking(null)} wide>
+          <ProjectTracker
+            project={projects.items.find((p) => p.id === tracking.id) || tracking}
+            quotes={quotes.items}
+            projects={projects}
+            updates={projectUpdates}
+          />
         </Modal>
       )}
     </div>
@@ -960,6 +976,123 @@ function ProjectForm({ initial, clients, defaultRate, defaultCurrency, onSave })
 
       <div className="cd-form-actions"><Btn kind="primary" type="submit">Save project</Btn></div>
     </form>
+  );
+}
+
+/* ------------------------------ Project Tracker ------------------------------ */
+function ProjectTracker({ project, quotes, projects, updates }) {
+  const [decks, setDecks] = useState(project.decks || []);
+  const linkedQuote = quotes.find((q) => q.id === project.quoteId);
+
+  const persistDecks = (next) => projects.update(project.id, { decks: next });
+  const updateDeckLocal = (i, patch) => setDecks(decks.map((d, idx) => idx === i ? { ...d, ...patch } : d));
+  const addDeck = () => {
+    const next = [...decks, { desc: "", hours: "", percentComplete: 0 }];
+    setDecks(next);
+    persistDecks(next);
+  };
+  const removeDeck = (i) => {
+    const next = decks.filter((_, idx) => idx !== i);
+    setDecks(next);
+    persistDecks(next);
+  };
+
+  const maxHours = Math.max(1, ...decks.map((d) => Number(d.hours) || 0));
+  const totalHours = decks.reduce((s, d) => s + (Number(d.hours) || 0), 0);
+  const overallPct = totalHours > 0
+    ? Math.round(decks.reduce((s, d) => s + (Number(d.percentComplete) || 0) * (Number(d.hours) || 0), 0) / totalHours)
+    : 0;
+
+  const [updateDate, setUpdateDate] = useState(todayISO());
+  const [updatePct, setUpdatePct] = useState("");
+  const [updateContent, setUpdateContent] = useState("");
+  const list = updates.items.filter((u) => u.projectId === project.id).sort((a, b) => (b.date + (b.createdAt || "")).localeCompare(a.date + (a.createdAt || "")));
+
+  const addUpdate = (e) => {
+    e.preventDefault();
+    if (!updateContent.trim()) return;
+    updates.add({ projectId: project.id, date: updateDate, content: updateContent.trim(), percentComplete: updatePct === "" ? null : Number(updatePct) });
+    setUpdateContent("");
+    setUpdatePct("");
+  };
+
+  return (
+    <div className="cd-form">
+      {linkedQuote && <div className="cd-hint">Linked quote: <strong className="mono">{linkedQuote.number}</strong></div>}
+
+      <div className="cd-subhead">Gantt — decks quoted on</div>
+      {decks.length === 0 ? (
+        <Empty icon={BarChart3} title="No decks yet" hint="Decks come in automatically when a quote converts to this project, or add them manually below." />
+      ) : (
+        <>
+          <div className="cd-gantt-header">
+            <span>Deck</span><span>Timeline</span><span>Hours</span><span>%</span><span></span>
+          </div>
+          <div className="cd-gantt">
+            {decks.map((d, i) => {
+              const hrs = Number(d.hours) || 0;
+              const pct = Math.min(100, Math.max(0, Number(d.percentComplete) || 0));
+              const barWidthPct = (hrs / maxHours) * 100;
+              return (
+                <div className="cd-gantt-row" key={i}>
+                  <input
+                    className="cd-gantt-desc" value={d.desc} placeholder="Deck description"
+                    onChange={(e) => updateDeckLocal(i, { desc: e.target.value })}
+                    onBlur={() => persistDecks(decks)}
+                  />
+                  <div className="cd-gantt-track">
+                    <div className="cd-gantt-bar" style={{ width: `${barWidthPct}%` }}>
+                      <div className="cd-gantt-fill" style={{ width: `${pct}%` }} />
+                    </div>
+                  </div>
+                  <input
+                    type="number" className="cd-gantt-hours" min="0" step="0.5" value={d.hours}
+                    onChange={(e) => updateDeckLocal(i, { hours: e.target.value })}
+                    onBlur={() => persistDecks(decks)}
+                  />
+                  <input
+                    type="number" className="cd-gantt-pct" min="0" max="100" step="5" value={d.percentComplete}
+                    onChange={(e) => updateDeckLocal(i, { percentComplete: e.target.value })}
+                    onBlur={() => persistDecks(decks)}
+                  />
+                  <button type="button" className="cd-iconbtn danger" onClick={() => removeDeck(i)}><Trash2 size={14} /></button>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+      <button type="button" className="cd-linkbtn" onClick={addDeck}><Plus size={14} /> Add deck</button>
+      {decks.length > 0 && (
+        <div className="cd-invoice-total">Overall completion: <span className="mono">{overallPct}%</span> <span style={{ fontWeight: 400, fontSize: 12.5, color: "var(--ink-soft)" }}>({totalHours}h quoted total)</span></div>
+      )}
+
+      <div className="cd-subhead" style={{ marginTop: 18 }}>Project updates</div>
+      <form onSubmit={addUpdate} className="cd-form">
+        <div className="cd-form-row">
+          <Field label="Date"><input type="date" value={updateDate} onChange={(e) => setUpdateDate(e.target.value)} /></Field>
+          <Field label="Overall % complete (optional)"><input type="number" min="0" max="100" value={updatePct} onChange={(e) => setUpdatePct(e.target.value)} placeholder="e.g. 40" /></Field>
+        </div>
+        <Field label="Update"><textarea rows={3} value={updateContent} onChange={(e) => setUpdateContent(e.target.value)} placeholder="What happened, what's next…" /></Field>
+        <div className="cd-form-actions"><Btn kind="primary" type="submit" icon={Plus}>Log update</Btn></div>
+      </form>
+
+      {list.length === 0 ? (
+        <Empty icon={NotebookPen} title="No updates logged yet" hint="Log progress here as the project moves forward." />
+      ) : (
+        <ul className="cd-list">
+          {list.map((u) => (
+            <li className="cd-list-row" key={u.id} style={{ alignItems: "flex-start" }}>
+              <div>
+                <div className="cd-list-sub mono" style={{ marginBottom: 4 }}>{fmtDate(u.date)}{u.percentComplete != null ? ` · ${u.percentComplete}% complete` : ""}</div>
+                <div style={{ fontSize: 13, whiteSpace: "pre-wrap" }}>{u.content}</div>
+              </div>
+              <button className="cd-iconbtn danger" onClick={() => updates.remove(u.id)}><Trash2 size={14} /></button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -1338,6 +1471,8 @@ function QuotesView({ ctx }) {
       isRetainer: false,
       retainerAmount: "",
       retainerDay: "",
+      quoteId: q.id,
+      decks: (q.lineItems || []).map((li) => ({ desc: li.desc, hours: Number(li.hours) || 0, percentComplete: 0 })),
     });
 
     if (newProject) {
@@ -2439,6 +2574,16 @@ const CSS = `
 
 .cd-bar{height:5px;background:var(--surface-2);border-radius:4px;overflow:hidden;margin-top:6px;}
 .cd-bar-fill{height:100%;background:var(--accent);}
+
+.cd-gantt-header{display:grid;grid-template-columns:1.4fr 2fr 70px 60px 28px;gap:8px;font-size:10.5px;text-transform:uppercase;letter-spacing:0.6px;color:var(--ink-soft);font-weight:700;padding:0 2px;}
+.cd-gantt{display:flex;flex-direction:column;gap:8px;}
+.cd-gantt-row{display:grid;grid-template-columns:1.4fr 2fr 70px 60px 28px;gap:8px;align-items:center;}
+.cd-gantt-desc{font-size:12.5px;border:1px solid var(--border);border-radius:7px;padding:6px 8px;font-family:var(--font-body);color:var(--ink);background:var(--surface);}
+.cd-gantt-track{height:16px;background:var(--surface-2);border-radius:5px;overflow:hidden;}
+.cd-gantt-bar{height:100%;background:var(--accent-soft);border-radius:5px;position:relative;overflow:hidden;min-width:6px;}
+.cd-gantt-fill{height:100%;background:var(--amber);}
+.cd-gantt-hours{width:100%;font-size:12px;border:1px solid var(--border);border-radius:7px;padding:5px 6px;text-align:right;font-family:var(--font-mono);}
+.cd-gantt-pct{width:100%;font-size:12px;border:1px solid var(--border);border-radius:7px;padding:5px 6px;text-align:right;font-family:var(--font-mono);}
 
 .cd-row-actions{display:flex;align-items:center;gap:6px;}
 .cd-iconbtn{width:28px;height:28px;border-radius:7px;border:1px solid var(--border);background:var(--surface);color:var(--ink-soft);display:flex;align-items:center;justify-content:center;cursor:pointer;}
