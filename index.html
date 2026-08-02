@@ -161,6 +161,7 @@ const DEFAULT_SETTINGS = {
   bankBranchCode: "",
   vatNumber: "",
   defaultTaxRate: 0,
+  hoursPerProjectDay: 2,
   paymentTerms: "Payment due within 14 days of invoice date.",
 };
 
@@ -1050,6 +1051,7 @@ function ProjectsView({ ctx }) {
             quotes={quotes.items}
             projects={projects}
             updates={projectUpdates}
+            hoursPerDay={settings.settings.hoursPerProjectDay}
           />
         </Modal>
       )}
@@ -1121,7 +1123,7 @@ function ProjectForm({ initial, clients, defaultRate, defaultCurrency, onSave })
 }
 
 /* ------------------------------ Project Tracker ------------------------------ */
-function ProjectTracker({ project, quotes, projects, updates }) {
+function ProjectTracker({ project, quotes, projects, updates, hoursPerDay }) {
   const [decks, setDecks] = useState(project.decks || []);
   const linkedQuote = quotes.find((q) => q.id === project.quoteId);
   const [linkQuoteId, setLinkQuoteId] = useState("");
@@ -1165,7 +1167,7 @@ function ProjectTracker({ project, quotes, projects, updates }) {
     ? Math.round(decks.reduce((s, d) => s + (Number(d.percentComplete) || 0) * (Number(d.hours) || 0), 0) / totalHours)
     : 0;
   const projectStartDate = project.startDate || todayISO();
-  const schedule = scheduleProjectDecks(decks, projectStartDate);
+  const schedule = scheduleProjectDecks(decks, projectStartDate, hoursPerDay);
 
   const [updateDate, setUpdateDate] = useState(todayISO());
   const [updatePct, setUpdatePct] = useState("");
@@ -1265,7 +1267,7 @@ function ProjectTracker({ project, quotes, projects, updates }) {
         <div className="cd-hint">
           {schedule.isComplete
             ? "All decks are marked complete — nothing left to project."
-            : <>Starting <strong>{fmtDate(projectStartDate)}</strong>, projected completion: <strong>{fmtDate(schedule.projectedCompletion)}</strong> — based on 8-hour workdays, Mon–Fri, working on this project's outstanding hours.</>}
+            : <>Starting <strong>{fmtDate(projectStartDate)}</strong>, projected completion: <strong>{fmtDate(schedule.projectedCompletion)}</strong> — based on {hoursPerDay || 2}h/day on this project, Mon–Fri.</>}
         </div>
       )}
 
@@ -1331,9 +1333,10 @@ function snapToBusinessDay(dateStr) {
 }
 
 // Schedules decks back-to-back starting from startDateStr, using only the
-// hours still remaining on each (quoted hours × (1 − % complete)), at 8
-// business hours/day, skipping weekends.
-function scheduleProjectDecks(decks, startDateStr) {
+// hours still remaining on each (quoted hours × (1 − % complete)), at a
+// configurable number of hours worked on this project per day, Mon–Fri.
+function scheduleProjectDecks(decks, startDateStr, hoursPerDay = WORK_HOURS_PER_DAY) {
+  const perDay = Number(hoursPerDay) > 0 ? Number(hoursPerDay) : WORK_HOURS_PER_DAY;
   let cursor = snapToBusinessDay(startDateStr);
   let anyRemaining = false;
   const scheduled = (decks || []).map((d) => {
@@ -1344,7 +1347,7 @@ function scheduleProjectDecks(decks, startDateStr) {
       return { ...d, startDate: cursor, endDate: cursor, remainingHours: 0 };
     }
     anyRemaining = true;
-    const businessDaysNeeded = Math.max(1, Math.ceil(remainingHours / WORK_HOURS_PER_DAY));
+    const businessDaysNeeded = Math.max(1, Math.ceil(remainingHours / perDay));
     const endDate = dateToISO(addBusinessDays(cursor, businessDaysNeeded));
     const startDate = cursor;
     cursor = nextBusinessDayAfter(endDate);
@@ -1427,7 +1430,7 @@ function OverviewView({ ctx }) {
               const { pct, source } = projectCompletion(p, timeEntries.items);
               const isOpen = !!expanded[p.id];
               const maxDeckHours = Math.max(1, ...decks.map((d) => Number(d.hours) || 0));
-              const schedule = decks.length > 0 ? scheduleProjectDecks(decks, p.startDate || todayISO()) : null;
+              const schedule = decks.length > 0 ? scheduleProjectDecks(decks, p.startDate || todayISO(), settings.settings.hoursPerProjectDay) : null;
               return (
                 <div className="cd-portfolio-row" key={p.id}>
                   <button type="button" className="cd-portfolio-summary" onClick={() => toggle(p.id)}>
@@ -2985,7 +2988,7 @@ function AdminView({ ctx }) {
 
   const onSubmit = (e) => {
     e.preventDefault();
-    settings.save({ ...form, defaultHourlyRate: Number(form.defaultHourlyRate) || 0, defaultTaxRate: Number(form.defaultTaxRate) || 0 });
+    settings.save({ ...form, defaultHourlyRate: Number(form.defaultHourlyRate) || 0, defaultTaxRate: Number(form.defaultTaxRate) || 0, hoursPerProjectDay: Number(form.hoursPerProjectDay) || 2 });
     setSaved(true);
     setTimeout(() => setSaved(false), 1500);
   };
@@ -3015,6 +3018,9 @@ function AdminView({ ctx }) {
           <div className="cd-form-row">
             <Field label="VAT / Tax number"><input value={form.vatNumber} onChange={set("vatNumber")} placeholder="e.g. 4123456789" /></Field>
             <Field label="Default tax / VAT rate (%)"><input type="number" min="0" step="0.1" value={form.defaultTaxRate} onChange={set("defaultTaxRate")} placeholder="e.g. 15" /></Field>
+          </div>
+          <div className="cd-form-row">
+            <Field label="Hours per project per day (Gantt projections)"><input type="number" min="0.5" step="0.5" value={form.hoursPerProjectDay} onChange={set("hoursPerProjectDay")} placeholder="e.g. 2" /></Field>
           </div>
           <Field label="Payment terms (shown on invoices)">
             <textarea rows={2} value={form.paymentTerms} onChange={set("paymentTerms")} placeholder="Payment due within 14 days of invoice date." />
