@@ -1390,6 +1390,16 @@ function OverviewView({ ctx }) {
 
   const toggle = (id) => setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
 
+  const selectedClient = clientFilter !== "all" ? clients.items.find((c) => c.id === clientFilter) : null;
+
+  const enriched = list.map((p) => {
+    const client = clients.items.find((c) => c.id === p.clientId);
+    const decks = p.decks || [];
+    const { pct } = projectCompletion(p, timeEntries.items);
+    const schedule = decks.length > 0 ? scheduleProjectDecks(decks, p.startDate || todayISO(), settings.settings.hoursPerProjectDay) : null;
+    return { p, client, decks, pct, schedule };
+  });
+
   return (
     <div className="cd-page">
       <PageHead
@@ -1420,73 +1430,105 @@ function OverviewView({ ctx }) {
           </div>
         </div>
 
+        {selectedClient && (
+          <div className="cd-doc-grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
+            <div>
+              <span>Prepared for</span>
+              <strong>{selectedClient.company || selectedClient.name}</strong>
+              {selectedClient.company && <div className="cd-muted">{selectedClient.name}</div>}
+              {selectedClient.email && <div className="cd-muted">{selectedClient.email}</div>}
+              {selectedClient.phone && <div className="cd-muted">{selectedClient.phone}</div>}
+            </div>
+            <div>
+              <span>Details</span>
+              {selectedClient.address && <div className="cd-muted" style={{ whiteSpace: "pre-line" }}>{selectedClient.address}</div>}
+              {selectedClient.taxNumber && <div className="cd-muted">Tax No: {selectedClient.taxNumber}</div>}
+            </div>
+          </div>
+        )}
+
         {list.length === 0 ? (
           <Empty icon={Layers} title="No projects to show" hint="Adjust the filters above, or create a project to see it here." />
         ) : (
-          <div className="cd-portfolio-list">
-            {list.map((p) => {
-              const client = clients.items.find((c) => c.id === p.clientId);
-              const decks = p.decks || [];
-              const { pct, source } = projectCompletion(p, timeEntries.items);
-              const isOpen = !!expanded[p.id];
-              const maxDeckHours = Math.max(1, ...decks.map((d) => Number(d.hours) || 0));
-              const schedule = decks.length > 0 ? scheduleProjectDecks(decks, p.startDate || todayISO(), settings.settings.hoursPerProjectDay) : null;
-              return (
-                <div className="cd-portfolio-row" key={p.id}>
-                  <button type="button" className="cd-portfolio-summary" onClick={() => toggle(p.id)}>
-                    <div className="cd-portfolio-title">
-                      <ChevronRight size={15} style={{ transform: isOpen ? "rotate(90deg)" : "none", transition: "transform .15s", flexShrink: 0, color: "var(--ink-soft)" }} />
-                      <div>
-                        <div style={{ fontWeight: 700, fontSize: 13.5 }}>{p.name}</div>
-                        <div className="cd-list-sub">
-                          {client?.company || client?.name}
-                          {p.startDate && ` · Starts: ${fmtDate(p.startDate)}`}
-                          {schedule && !schedule.isComplete && ` · Est. completion: ${fmtDate(schedule.projectedCompletion)}`}
+          <>
+            <div className="cd-subhead">Executive summary</div>
+            <table className="cd-table">
+              <thead><tr><th>Project</th><th>Client</th><th>Status</th><th>Complete</th><th>Est. completion</th></tr></thead>
+              <tbody>
+                {enriched.map(({ p, client, pct, schedule }) => (
+                  <tr key={p.id}>
+                    <td>{p.name}</td>
+                    <td>{client?.company || client?.name}</td>
+                    <td><Stamp status={p.status} /></td>
+                    <td className="mono">{pct === null ? "—" : `${pct}%`}</td>
+                    <td className="mono">{schedule && !schedule.isComplete ? fmtDate(schedule.projectedCompletion) : schedule ? "Complete" : "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            <div className="cd-subhead" style={{ marginTop: 16 }}>Project detail</div>
+            <div className="cd-portfolio-list">
+              {enriched.map(({ p, client, decks, pct, schedule }) => {
+                const isOpen = !!expanded[p.id];
+                const maxDeckHours = Math.max(1, ...decks.map((d) => Number(d.hours) || 0));
+                return (
+                  <div className="cd-portfolio-row" key={p.id}>
+                    <button type="button" className="cd-portfolio-summary" onClick={() => toggle(p.id)}>
+                      <div className="cd-portfolio-title">
+                        <ChevronRight size={15} style={{ transform: isOpen ? "rotate(90deg)" : "none", transition: "transform .15s", flexShrink: 0, color: "var(--ink-soft)" }} />
+                        <div>
+                          <div style={{ fontWeight: 700, fontSize: 13.5 }}>{p.name}</div>
+                          <div className="cd-list-sub">
+                            {client?.company || client?.name}
+                            {p.startDate && ` · Starts: ${fmtDate(p.startDate)}`}
+                            {schedule && !schedule.isComplete && ` · Est. completion: ${fmtDate(schedule.projectedCompletion)}`}
+                          </div>
                         </div>
                       </div>
-                    </div>
-                    <div className="cd-portfolio-bar-wrap">
-                      <div className="cd-portfolio-bar"><div className="cd-portfolio-bar-fill" style={{ width: `${pct ?? 0}%` }} /></div>
-                      <span className="mono" style={{ fontSize: 12.5, minWidth: 38, textAlign: "right" }}>{pct === null ? "—" : `${pct}%`}</span>
-                    </div>
-                    <Stamp status={p.status} />
-                  </button>
+                      <div className="cd-portfolio-bar-wrap">
+                        <div className="cd-portfolio-bar"><div className="cd-portfolio-bar-fill" style={{ width: `${pct ?? 0}%` }} /></div>
+                        <span className="mono" style={{ fontSize: 12.5, minWidth: 38, textAlign: "right" }}>{pct === null ? "—" : `${pct}%`}</span>
+                      </div>
+                      <Stamp status={p.status} />
+                    </button>
 
-                  {isOpen && (
-                    <div className="cd-portfolio-decks">
-                      {decks.length === 0 ? (
-                        <div className="cd-hint">No deck breakdown for this project yet — open Tracker &amp; Gantt from the Projects tab to add one.</div>
-                      ) : (
-                        <>
-                          <div className="cd-gantt-header" style={{ gridTemplateColumns: "1.4fr 2fr 60px 50px" }}>
-                            <span>Deck</span><span>Timeline</span><span>Hours</span><span>%</span>
-                          </div>
-                          {decks.map((d, i) => {
-                            const dpct = Math.min(100, Math.max(0, Number(d.percentComplete) || 0));
-                            const barW = ((Number(d.hours) || 0) / maxDeckHours) * 100;
-                            const sched = schedule?.decks?.[i];
-                            return (
-                              <div className="cd-gantt-item" key={i}>
-                                <div className="cd-gantt-row" style={{ gridTemplateColumns: "1.4fr 2fr 60px 50px" }}>
-                                  <span style={{ fontSize: 12.5 }}>{d.desc || "—"}</span>
-                                  <div className="cd-gantt-track"><div className="cd-gantt-bar" style={{ width: `${barW}%` }}><div className="cd-gantt-fill" style={{ width: `${dpct}%` }} /></div></div>
-                                  <span className="mono" style={{ fontSize: 12 }}>{fmtHrs(d.hours)}</span>
-                                  <span className="mono" style={{ fontSize: 12 }}>{dpct}%</span>
+                    {isOpen && (
+                      <div className="cd-portfolio-decks">
+                        {decks.length === 0 ? (
+                          <div className="cd-hint">No deck breakdown for this project yet — open Tracker &amp; Gantt from the Projects tab to add one.</div>
+                        ) : (
+                          <>
+                            <div className="cd-gantt-header" style={{ gridTemplateColumns: "1.4fr 2fr 60px 50px" }}>
+                              <span>Deck</span><span>Timeline</span><span>Hours</span><span>%</span>
+                            </div>
+                            {decks.map((d, i) => {
+                              const dpct = Math.min(100, Math.max(0, Number(d.percentComplete) || 0));
+                              const barW = ((Number(d.hours) || 0) / maxDeckHours) * 100;
+                              const sched = schedule?.decks?.[i];
+                              return (
+                                <div className="cd-gantt-item" key={i}>
+                                  <div className="cd-gantt-row" style={{ gridTemplateColumns: "1.4fr 2fr 60px 50px" }}>
+                                    <span style={{ fontSize: 12.5 }}>{d.desc || "—"}</span>
+                                    <div className="cd-gantt-track"><div className="cd-gantt-bar" style={{ width: `${barW}%` }}><div className="cd-gantt-fill" style={{ width: `${dpct}%` }} /></div></div>
+                                    <span className="mono" style={{ fontSize: 12 }}>{fmtHrs(d.hours)}</span>
+                                    <span className="mono" style={{ fontSize: 12 }}>{dpct}%</span>
+                                  </div>
+                                  <div className="cd-gantt-dates">
+                                    {sched && sched.remainingHours > 0 ? `Projected: ${fmtDate(sched.startDate)} → ${fmtDate(sched.endDate)}` : "Complete"}
+                                  </div>
                                 </div>
-                                <div className="cd-gantt-dates">
-                                  {sched && sched.remainingHours > 0 ? `Projected: ${fmtDate(sched.startDate)} → ${fmtDate(sched.endDate)}` : "Complete"}
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </>
-                      )}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
+                              );
+                            })}
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </>
         )}
       </div>
     </div>
