@@ -26,7 +26,7 @@ const DollarSign = mkIcon("$"); const Play = mkIcon("▶"); const Pause = mkIcon
 const FileText = mkIcon("📄"); const Send = mkIcon("➤"); const CircleCheck = mkIcon("✔");
 const AlertCircle = mkIcon("!"); const Settings = mkIcon("⚙"); const NotebookPen = mkIcon("📝");
 const Printer = mkIcon("🖶"); const BarChart3 = mkIcon("📊"); const Repeat = mkIcon("↻");
-const UserCheck = mkIcon("🙋"); const LogOut = mkIcon("⎋"); const BookOpen = mkIcon("📖"); const ExternalLink = mkIcon("↗"); const FileSignature = mkIcon("📋"); const Layers = mkIcon("🗂");
+const UserCheck = mkIcon("🙋"); const LogOut = mkIcon("⎋"); const BookOpen = mkIcon("📖"); const ExternalLink = mkIcon("↗"); const FileSignature = mkIcon("📋"); const Layers = mkIcon("🗂"); const Lightbulb = mkIcon("💡"); const Eraser = mkIcon("🧹"); const Undo2 = mkIcon("↩");
 
 /* ---- Supabase client (loaded from CDN as window.supabase) ---- */
 const SUPABASE_URL = "https://ziladpnlfajtiboavwvn.supabase.co";
@@ -429,7 +429,7 @@ const monthLabelShort = (ym) => new Date(ym + "-01T00:00:00").toLocaleDateString
 const STATUS_COLORS = {
   active: "var(--accent)", paused: "var(--amber)", completed: "var(--ink-soft)",
   draft: "var(--ink-soft)", sent: "var(--amber)", paid: "var(--success)", overdue: "var(--danger)",
-  accepted: "var(--success)", declined: "var(--danger)", expired: "var(--ink-soft)",
+  accepted: "var(--success)", declined: "var(--danger)", expired: "var(--ink-soft)", deployed: "var(--success)",
 };
 
 /* ------------------------------ shell UI ------------------------------ */
@@ -440,6 +440,7 @@ const NAV = [
   { key: "overview", label: "Overview", icon: Layers },
   { key: "time", label: "Time", icon: Clock },
   { key: "schedule", label: "Schedule", icon: CalendarDays },
+  { key: "concepts", label: "Concept", icon: Lightbulb },
   { key: "quotes", label: "Quotes", icon: FileSignature },
   { key: "billing", label: "Billing", icon: Receipt },
   { key: "messages", label: "Messages", icon: Mail },
@@ -462,10 +463,11 @@ function App() {
   const quotes = useCollection("quotes");
   const projectUpdates = useCollection("project_updates");
   const personalTime = useCollection("personal_time");
+  const concepts = useCollection("concepts");
   const settingsHook = useSettings();
 
-  const ctx = { clients, projects, timeEntries, meetings, invoices, clientNotes, comms, expenses, quotes, projectUpdates, personalTime, settings: settingsHook };
-  const loading = !clients.ready || !projects.ready || !timeEntries.ready || !meetings.ready || !invoices.ready || !clientNotes.ready || !comms.ready || !expenses.ready || !quotes.ready || !projectUpdates.ready || !personalTime.ready || !settingsHook.ready;
+  const ctx = { clients, projects, timeEntries, meetings, invoices, clientNotes, comms, expenses, quotes, projectUpdates, personalTime, concepts, settings: settingsHook };
+  const loading = !clients.ready || !projects.ready || !timeEntries.ready || !meetings.ready || !invoices.ready || !clientNotes.ready || !comms.ready || !expenses.ready || !quotes.ready || !projectUpdates.ready || !personalTime.ready || !concepts.ready || !settingsHook.ready;
 
   // Automations: run once per session after data loads — flip overdue invoices,
   // and generate draft retainer invoices for active retainer projects that are due.
@@ -545,6 +547,7 @@ function App() {
             {tab === "overview" && <OverviewView ctx={ctx} />}
             {tab === "time" && <TimeView ctx={ctx} />}
             {tab === "schedule" && <ScheduleView ctx={ctx} />}
+            {tab === "concepts" && <ConceptsView ctx={ctx} />}
             {tab === "quotes" && <QuotesView ctx={ctx} />}
             {tab === "billing" && <BillingView ctx={ctx} />}
             {tab === "messages" && <MessagesView ctx={ctx} />}
@@ -1999,6 +2002,390 @@ function MeetingForm({ initial, clients, projects, onSave }) {
   );
 }
 
+/* ------------------------------ Concept whiteboard ------------------------------ */
+const DISCOVERY_QUESTIONS = [
+  "What problem are we trying to solve?",
+  "Who will actually use this? (roles / personas)",
+  "What are the must-have features for a first version?",
+  "What's nice-to-have but can wait?",
+  "Any existing systems, data, or tools this needs to work with?",
+  "Any design or branding preferences?",
+  "What does success look like — how will we know it worked?",
+  "Rough budget or timeline expectations?",
+  "Any technical constraints or preferences (platform, hosting, etc.)?",
+];
+
+const SHAPE_DEFS = [
+  { type: "rect", label: "Process", w: 120, h: 56 },
+  { type: "diamond", label: "Decision", w: 100, h: 100 },
+  { type: "oval", label: "Start / End", w: 120, h: 48 },
+  { type: "db", label: "Database", w: 96, h: 68 },
+  { type: "arrow", label: "Arrow", w: 64, h: 32 },
+];
+
+function ShapePreview({ type }) {
+  if (type === "arrow") return <span style={{ fontSize: 13, lineHeight: 1 }}>→</span>;
+  return <div className={`cd-shape-swatch cd-shape-${type}`} />;
+}
+
+function Whiteboard({ strokes, setStrokes, notes, setNotes, shapes, setShapes }) {
+  const canvasRef = useRef(null);
+  const [drawing, setDrawing] = useState(false);
+  const [currentStroke, setCurrentStroke] = useState(null);
+  const [color, setColor] = useState("#073E6B");
+  const [tool, setTool] = useState("pen"); // pen | eraser | note | rect | diamond | oval | db | arrow
+
+  const CANVAS_W = 860, CANVAS_H = 460;
+
+  const redraw = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#FFFFFF";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    [...strokes, currentStroke].filter(Boolean).forEach((s) => {
+      if (s.points.length < 2) return;
+      ctx.strokeStyle = s.color;
+      ctx.lineWidth = s.width;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      s.points.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+      ctx.stroke();
+    });
+  }, [strokes, currentStroke]);
+
+  useEffect(() => { redraw(); }, [redraw]);
+
+  const getPos = (e) => {
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+    return { x: clientX - rect.left, y: clientY - rect.top };
+  };
+
+  const shapeTypes = SHAPE_DEFS.map((s) => s.type);
+
+  const handleStart = (e) => {
+    e.preventDefault();
+    const pos = getPos(e);
+    if (tool === "note") {
+      const text = window.prompt("Note text:");
+      if (text) setNotes([...notes, { x: pos.x, y: pos.y, text, color }]);
+      return;
+    }
+    if (shapeTypes.includes(tool)) {
+      const def = SHAPE_DEFS.find((s) => s.type === tool);
+      const text = window.prompt(`Label for this ${def.label.toLowerCase()} (optional):`) || "";
+      setShapes([...shapes, { type: tool, x: pos.x - def.w / 2, y: pos.y - def.h / 2, w: def.w, h: def.h, text, color }]);
+      return;
+    }
+    setDrawing(true);
+    setCurrentStroke({ points: [pos], color: tool === "eraser" ? "#FFFFFF" : color, width: tool === "eraser" ? 22 : 3 });
+  };
+  const handleMove = (e) => {
+    if (!drawing) return;
+    e.preventDefault();
+    const pos = getPos(e);
+    setCurrentStroke((s) => ({ ...s, points: [...s.points, pos] }));
+  };
+  const handleEnd = () => {
+    if (currentStroke) setStrokes([...strokes, currentStroke]);
+    setCurrentStroke(null);
+    setDrawing(false);
+  };
+
+  const editShape = (i) => {
+    const text = window.prompt("Edit label:", shapes[i].text || "");
+    if (text !== null) setShapes(shapes.map((s, idx) => idx === i ? { ...s, text } : s));
+  };
+
+  const undo = () => setStrokes(strokes.slice(0, -1));
+  const clearAll = () => { if (confirm("Clear the whole whiteboard?")) { setStrokes([]); setNotes([]); setShapes([]); } };
+
+  const COLORS = ["#073E6B", "#F5820A", "#B23A3A", "#2F7D4F", "#14171F"];
+
+  return (
+    <div>
+      <div className="cd-whiteboard-toolbar">
+        <div className="cd-whiteboard-tools">
+          <button type="button" className={"cd-iconbtn" + (tool === "pen" ? " active" : "")} onClick={() => setTool("pen")} title="Pen"><Pencil size={14} /></button>
+          <button type="button" className={"cd-iconbtn" + (tool === "eraser" ? " active" : "")} onClick={() => setTool("eraser")} title="Eraser"><Eraser size={14} /></button>
+          <button type="button" className={"cd-iconbtn" + (tool === "note" ? " active" : "")} onClick={() => setTool("note")} title="Add sticky note"><NotebookPen size={14} /></button>
+          {COLORS.map((c) => (
+            <button type="button" key={c} onClick={() => setColor(c)} className="cd-color-swatch" style={{ background: c, outline: color === c ? "2px solid var(--ink)" : "1px solid var(--border)" }} />
+          ))}
+          <span className="cd-toolbar-divider" />
+          {SHAPE_DEFS.map((s) => (
+            <button type="button" key={s.type} className={"cd-iconbtn" + (tool === s.type ? " active" : "")} onClick={() => setTool(s.type)} title={s.label}>
+              <ShapePreview type={s.type} />
+            </button>
+          ))}
+        </div>
+        <div className="cd-whiteboard-tools">
+          <Btn icon={Undo2} onClick={undo} disabled={strokes.length === 0}>Undo</Btn>
+          <Btn icon={Trash2} onClick={clearAll}>Clear</Btn>
+        </div>
+      </div>
+      <div className="cd-whiteboard-canvas-wrap">
+        <canvas
+          ref={canvasRef} width={CANVAS_W} height={CANVAS_H}
+          className="cd-whiteboard-canvas"
+          onMouseDown={handleStart} onMouseMove={handleMove} onMouseUp={handleEnd} onMouseLeave={handleEnd}
+          onTouchStart={handleStart} onTouchMove={handleMove} onTouchEnd={handleEnd}
+        />
+        {shapes.map((s, i) => (
+          <div
+            key={i}
+            className={`cd-shape cd-shape-${s.type}`}
+            style={{ left: s.x, top: s.y, width: s.w, height: s.h, borderColor: s.color, color: s.color }}
+            onClick={() => editShape(i)}
+            title="Click to edit label"
+          >
+            <span className="cd-shape-text">{s.text}</span>
+            <button type="button" className="cd-shape-delete" onClick={(e) => { e.stopPropagation(); setShapes(shapes.filter((_, idx) => idx !== i)); }}>×</button>
+          </div>
+        ))}
+        {notes.map((n, i) => (
+          <div key={i} className="cd-sticky-note" style={{ left: n.x, top: n.y, background: (n.color || "#073E6B") + "22", borderColor: n.color || "#073E6B" }}>
+            <span>{n.text}</span>
+            <button type="button" onClick={() => setNotes(notes.filter((_, idx) => idx !== i))}>×</button>
+          </div>
+        ))}
+      </div>
+      <div className="cd-hint" style={{ marginTop: 8 }}>Tip: use the pen to sketch layouts or flows while you talk, and the sticky note tool to pin quick ideas anywhere on the board.</div>
+    </div>
+  );
+}
+
+function ConceptsView({ ctx }) {
+  const { concepts, clients } = ctx;
+  const [editingId, setEditingId] = useState(null);
+  const [creatingNew, setCreatingNew] = useState(false);
+
+  const list = [...concepts.items].sort((a, b) => (b.date + (b.createdAt || "")).localeCompare(a.date + (a.createdAt || "")));
+
+  if (creatingNew || editingId) {
+    const concept = editingId ? concepts.items.find((c) => c.id === editingId) : null;
+    return (
+      <ConceptEditor
+        ctx={ctx}
+        concept={concept}
+        onClose={() => { setCreatingNew(false); setEditingId(null); }}
+      />
+    );
+  }
+
+  return (
+    <div className="cd-page">
+      <PageHead
+        eyebrow="discovery"
+        title="Concept"
+        action={<Btn kind="primary" icon={Plus} onClick={() => setCreatingNew(true)}>New concept</Btn>}
+      />
+      {list.length === 0 ? (
+        <Empty icon={Lightbulb} title="No concepts yet" hint="Sketch out an idea with a client on a call, answer a few discovery questions, then deploy it into a new or existing project." />
+      ) : (
+        <div className="cd-cardgrid">
+          {list.map((c) => {
+            const client = clients.items.find((cl) => cl.id === c.clientId);
+            return (
+              <div className="cd-card" key={c.id}>
+                <div className="cd-card-head">
+                  <div>
+                    <h3>{c.title}</h3>
+                    <div className="cd-list-sub">{client?.company || client?.name || c.clientName || "No client linked"}</div>
+                  </div>
+                  <div className="cd-row-actions">
+                    <Stamp status={c.status} />
+                    <button className="cd-iconbtn danger" onClick={() => { if (confirm(`Delete "${c.title}"?`)) concepts.remove(c.id); }}><Trash2 size={14} /></button>
+                  </div>
+                </div>
+                <div className="cd-kv"><span>Date</span><span className="mono">{fmtDate(c.date)}</span></div>
+                <div className="cd-kv"><span>Sketch strokes</span><span className="mono">{(c.strokes || []).length}</span></div>
+                <div className="cd-form-actions" style={{ marginTop: 10 }}>
+                  <Btn kind="primary" onClick={() => setEditingId(c.id)}>Open</Btn>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ConceptEditor({ ctx, concept, onClose }) {
+  const { concepts, clients, projects, projectUpdates, settings } = ctx;
+  const [title, setTitle] = useState(concept?.title || "");
+  const [clientId, setClientId] = useState(concept?.clientId || "");
+  const [clientName, setClientName] = useState(concept?.clientName || "");
+  const [projectId, setProjectId] = useState(concept?.projectId || "");
+  const [date] = useState(concept?.date || todayISO());
+  const [questions, setQuestions] = useState(
+    concept?.questions?.length ? concept.questions : DISCOVERY_QUESTIONS.map((q) => ({ question: q, answer: "" }))
+  );
+  const [strokes, setStrokes] = useState(concept?.strokes || []);
+  const [shapes, setShapes] = useState(concept?.shapes || []);
+  const [notes, setNotes] = useState(concept?.notes || []);
+  const [summaryNotes, setSummaryNotes] = useState(concept?.summaryNotes || "");
+  const [saved, setSaved] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const clientProjects = projects.items.filter((p) => p.clientId === clientId);
+
+  const buildPayload = () => ({
+    title, clientId: clientId || null, clientName, projectId: projectId || null, date,
+    questions, strokes, notes, shapes, summaryNotes, status: concept?.status || "draft",
+  });
+
+  const save = async () => {
+    if (!title.trim()) { alert("Give this concept a title first."); return; }
+    if (concept?.id) await concepts.update(concept.id, buildPayload());
+    else await concepts.add(buildPayload());
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  const answeredQuestions = questions.filter((q) => q.answer && q.answer.trim());
+
+  const buildBrief = () => {
+    const client = clients.items.find((c) => c.id === clientId);
+    const clientLabel = client ? (client.company || client.name) : (clientName || "Not specified");
+    const project = projects.items.find((p) => p.id === projectId);
+    return [
+      `# ${title || "Untitled concept"}`,
+      "",
+      `Client: ${clientLabel}`,
+      project ? `Existing project: ${project.name}` : "This is a concept for a NEW project.",
+      `Date: ${fmtDate(date)}`,
+      "",
+      "## Discovery notes",
+      ...answeredQuestions.map((q) => `- **${q.question}**\n  ${q.answer.trim()}`),
+      "",
+      summaryNotes ? `## Additional notes\n${summaryNotes}` : null,
+      strokes.length > 0 || notes.length > 0 || shapes.length > 0
+        ? `\n## Whiteboard\nA hand-sketched whiteboard was created alongside this brief (${strokes.length} sketch strokes, ${notes.length} sticky notes, ${shapes.length} diagram shapes).`
+          + (notes.length > 0 ? "\nSticky note contents:\n" + notes.map((n) => `- ${n.text}`).join("\n") : "")
+          + (shapes.length > 0 ? "\nDiagram shapes (in the order placed):\n" + shapes.map((s) => `- ${SHAPE_DEFS.find((d) => d.type === s.type)?.label || s.type}${s.text ? `: "${s.text}"` : " (unlabeled)"}`).join("\n") : "")
+        : null,
+      "",
+      project
+        ? "Please help me plan/implement the above as an update to the existing project."
+        : "Please help me plan out this new project — propose a scope, suggested decks/phases with rough hour estimates, and any clarifying questions.",
+    ].filter(Boolean).join("\n");
+  };
+
+  const copyBrief = () => {
+    navigator.clipboard.writeText(buildBrief());
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const downloadSketch = () => {
+    const canvas = document.querySelector(".cd-whiteboard-canvas");
+    if (!canvas) return;
+    const link = document.createElement("a");
+    link.download = `${(title || "concept").replace(/\s+/g, "-")}-sketch.png`;
+    link.href = canvas.toDataURL("image/png");
+    link.click();
+  };
+
+  const deployNewProject = async () => {
+    if (!clientId) { alert("Link this concept to an existing client first (add the client under Clients if they're not in the system yet)."); return; }
+    const summary = answeredQuestions.map((q) => `${q.question}\n${q.answer.trim()}`).join("\n\n");
+    const newProject = await projects.add({
+      clientId, name: title || "New project", status: "active",
+      hourlyRate: settings.settings.defaultHourlyRate || 0, currency: settings.settings.defaultCurrency || "USD",
+      budgetHours: "", notes: `From concept: ${title}\n\n${summary}${summaryNotes ? `\n\n${summaryNotes}` : ""}`,
+      isRetainer: false, retainerAmount: "", retainerDay: "", startDate: todayISO(),
+    });
+    if (newProject) {
+      setProjectId(newProject.id);
+      await concepts.update(concept?.id, { ...buildPayload(), projectId: newProject.id, status: "deployed" });
+      alert(`Created project "${newProject.name}". You can find it in the Projects tab.`);
+    }
+  };
+
+  const deployAsUpdate = async () => {
+    if (!projectId) return;
+    const summary = answeredQuestions.map((q) => `${q.question}\n${q.answer.trim()}`).join("\n\n");
+    await projectUpdates.add({
+      projectId, date: todayISO(),
+      content: `From concept session "${title}":\n\n${summary}${summaryNotes ? `\n\n${summaryNotes}` : ""}`,
+      percentComplete: null,
+    });
+    await concepts.update(concept?.id, { ...buildPayload(), status: "deployed" });
+    alert("Added as a project update — you'll find it in that project's Tracker & Gantt.");
+  };
+
+  return (
+    <div className="cd-page">
+      <PageHead
+        eyebrow="discovery"
+        title={title || "New concept"}
+        action={<Btn onClick={onClose}>Back to list</Btn>}
+      />
+
+      <section className="cd-card">
+        <div className="cd-form-row">
+          <Field label="Concept title"><input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Client portal redesign" /></Field>
+          <Field label="Client (existing)">
+            <select value={clientId} onChange={(e) => { setClientId(e.target.value); setProjectId(""); }}>
+              <option value="">— none yet —</option>
+              {clients.items.map((c) => <option key={c.id} value={c.id}>{c.company || c.name}</option>)}
+            </select>
+          </Field>
+        </div>
+        <div className="cd-form-row">
+          {!clientId && <Field label="Or a name/company (not in system yet)"><input value={clientName} onChange={(e) => setClientName(e.target.value)} placeholder="Prospect / company name" /></Field>}
+          {clientId && (
+            <Field label="Existing project (optional — leave blank for a new project idea)">
+              <select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
+                <option value="">— new project idea —</option>
+                {clientProjects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </Field>
+          )}
+        </div>
+      </section>
+
+      <section className="cd-card">
+        <div className="cd-card-head"><h3>Whiteboard</h3></div>
+        <Whiteboard strokes={strokes} setStrokes={setStrokes} notes={notes} setNotes={setNotes} shapes={shapes} setShapes={setShapes} />
+      </section>
+
+      <section className="cd-card">
+        <div className="cd-card-head"><h3>Discovery questions</h3></div>
+        <div className="cd-form">
+          {questions.map((q, i) => (
+            <Field label={q.question} key={i}>
+              <textarea rows={2} value={q.answer} onChange={(e) => setQuestions(questions.map((qq, idx) => idx === i ? { ...qq, answer: e.target.value } : qq))} />
+            </Field>
+          ))}
+          <Field label="Additional notes"><textarea rows={3} value={summaryNotes} onChange={(e) => setSummaryNotes(e.target.value)} placeholder="Anything else worth capturing…" /></Field>
+        </div>
+      </section>
+
+      <section className="cd-card">
+        <div className="cd-card-head"><h3>Save &amp; deploy</h3></div>
+        <div className="cd-form-actions" style={{ justifyContent: "flex-start", flexWrap: "wrap" }}>
+          <Btn kind="primary" icon={saved ? Check : undefined} onClick={save}>{saved ? "Saved" : "Save concept"}</Btn>
+          <Btn icon={copied ? Check : Copy} onClick={copyBrief}>{copied ? "Copied" : "Copy brief for Claude"}</Btn>
+          <Btn icon={Printer} onClick={downloadSketch}>Download sketch (PNG)</Btn>
+          {!projectId && <Btn onClick={deployNewProject}>Deploy → create new project</Btn>}
+          {projectId && <Btn onClick={deployAsUpdate}>Deploy → add as project update</Btn>}
+        </div>
+        <div className="cd-hint" style={{ marginTop: 10 }}>
+          This app can't send messages to Claude directly — "Copy brief for Claude" prepares a clean, ready-to-paste summary of everything above (answers + notes). Paste it into a new chat with Claude here to kick off the build or plan the update, and drag in the downloaded sketch image alongside it if it'll help.
+        </div>
+      </section>
+    </div>
+  );
+}
+
 /* ------------------------------ Quotes ------------------------------ */
 function quoteSubtotal(q) {
   return (q.lineItems || []).reduce((s, li) => s + Number(li.amount || 0), 0);
@@ -3196,6 +3583,32 @@ const CSS = `
 .cd-iconbtn{width:28px;height:28px;border-radius:7px;border:1px solid var(--border);background:var(--surface);color:var(--ink-soft);display:flex;align-items:center;justify-content:center;cursor:pointer;}
 .cd-iconbtn:hover{background:var(--surface-2);color:var(--ink);}
 .cd-iconbtn.danger:hover{background:var(--danger-soft);color:var(--danger);border-color:var(--danger);}
+.cd-iconbtn.active{background:var(--ink);color:#fff;border-color:var(--ink);}
+
+.cd-whiteboard-toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:10px;flex-wrap:wrap;}
+.cd-whiteboard-tools{display:flex;align-items:center;gap:6px;}
+.cd-color-swatch{width:22px;height:22px;border-radius:50%;cursor:pointer;padding:0;}
+.cd-whiteboard-canvas-wrap{position:relative;width:100%;overflow:auto;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);}
+.cd-whiteboard-canvas{display:block;cursor:crosshair;touch-action:none;background:#fff;}
+.cd-sticky-note{position:absolute;max-width:160px;font-size:11.5px;padding:6px 8px;border-radius:6px;border:1.5px solid;box-shadow:0 2px 6px rgba(0,0,0,0.08);display:flex;align-items:flex-start;gap:4px;}
+.cd-sticky-note span{flex:1;white-space:pre-wrap;word-break:break-word;}
+.cd-sticky-note button{border:none;background:none;cursor:pointer;color:var(--ink-soft);font-size:13px;line-height:1;padding:0;}
+
+.cd-toolbar-divider{width:1px;height:20px;background:var(--border);margin:0 2px;}
+.cd-shape-swatch{width:16px;height:12px;border:1.5px solid var(--ink-soft);background:none;}
+.cd-shape-rect.cd-shape-swatch{border-radius:2px;}
+.cd-shape-diamond.cd-shape-swatch{width:14px;height:14px;clip-path:polygon(50% 0%,100% 50%,50% 100%,0% 50%);}
+.cd-shape-oval.cd-shape-swatch{border-radius:999px;}
+.cd-shape-db.cd-shape-swatch{border-radius:50% 50% 3px 3px / 40% 40% 3px 3px;}
+
+.cd-shape{position:absolute;display:flex;align-items:center;justify-content:center;background:#fff;border:2px solid;cursor:pointer;padding:4px 8px;box-sizing:border-box;}
+.cd-shape-rect{border-radius:6px;}
+.cd-shape-diamond{clip-path:polygon(50% 0%,100% 50%,50% 100%,0% 50%);}
+.cd-shape-oval{border-radius:999px;}
+.cd-shape-db{border-radius:50% 50% 6px 6px / 22% 22% 6px 6px;}
+.cd-shape-arrow{border:none;background:none;font-size:26px;font-weight:700;justify-content:center;}
+.cd-shape-text{font-size:11.5px;text-align:center;word-break:break-word;color:inherit;font-weight:600;}
+.cd-shape-delete{position:absolute;top:-9px;right:-9px;width:18px;height:18px;border-radius:50%;background:var(--surface);border:1px solid var(--border);color:var(--ink-soft);font-size:12px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;}
 
 .cd-stamp{font-family:var(--font-mono);font-size:10px;letter-spacing:1.2px;text-transform:uppercase;color:var(--stamp-color);border:1.5px solid var(--stamp-color);border-radius:4px;padding:3px 7px;display:inline-block;transform:rotate(-1.5deg);font-weight:600;}
 
