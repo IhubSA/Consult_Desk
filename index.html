@@ -104,9 +104,11 @@ function useSupabaseCollection(table, orderColumn = "created_at") {
       .single();
     if (error) {
       console.error(`Failed to update ${table}:`, error.message);
-      return;
+      return null;
     }
-    setItems((prev) => prev.map((it) => (it.id === id ? keysFromDb(data) : it)));
+    const row = keysFromDb(data);
+    setItems((prev) => prev.map((it) => (it.id === id ? row : it)));
+    return row;
   }, [table]);
 
   const remove = useCallback(async (id) => {
@@ -334,13 +336,56 @@ async function logTimeEntry(entry, ctx) {
         const totalLogged = [...timeEntries.items, saved]
           .filter((t) => t.projectId === project.id && t.deckDesc === saved.deckDesc)
           .reduce((s, t) => s + Number(t.hours || 0), 0);
-        const newPct = Math.min(100, Math.round((totalLogged / deckHours) * 100));
+        const newPct = Math.min(100, Math.round((totalLogged / deckHours) * 1000) / 10);
         const newDecks = project.decks.map((d, i) => i === deckIdx ? { ...d, percentComplete: newPct } : d);
         await projects.update(project.id, { decks: newDecks });
       }
     }
   }
   return saved;
+}
+
+// Same idea, but for editing an existing entry — recalculates whichever
+// deck(s) are affected (the one it's now tagged to, and the one it moved
+// away from, if any), grouped into a single write per project to avoid
+// two edits racing and clobbering each other.
+async function updateTimeEntryAndSync(id, patch, ctx) {
+  const { timeEntries, projects } = ctx;
+  const before = timeEntries.items.find((t) => t.id === id);
+  const updated = await timeEntries.update(id, patch);
+  const after = updated || { ...before, ...patch };
+  const currentEntries = timeEntries.items.map((t) => (t.id === id ? after : t));
+
+  const affected = [];
+  if (after.projectId && after.deckDesc) affected.push({ projectId: after.projectId, deckDesc: after.deckDesc });
+  if (before && before.projectId && before.deckDesc && (before.projectId !== after.projectId || before.deckDesc !== after.deckDesc)) {
+    affected.push({ projectId: before.projectId, deckDesc: before.deckDesc });
+  }
+
+  const byProject = {};
+  affected.forEach(({ projectId, deckDesc }) => {
+    if (!byProject[projectId]) byProject[projectId] = new Set();
+    byProject[projectId].add(deckDesc);
+  });
+
+  for (const projectId of Object.keys(byProject)) {
+    const project = projects.items.find((p) => p.id === projectId);
+    if (!project || !project.decks) continue;
+    const deckDescs = byProject[projectId];
+    const newDecks = project.decks.map((d) => {
+      if (!deckDescs.has(d.desc)) return d;
+      const deckHours = Number(d.hours) || 0;
+      if (deckHours <= 0) return d;
+      const totalLogged = currentEntries
+        .filter((t) => t.projectId === projectId && t.deckDesc === d.desc)
+        .reduce((s, t) => s + Number(t.hours || 0), 0);
+      const newPct = Math.min(100, Math.round((totalLogged / deckHours) * 1000) / 10);
+      return { ...d, percentComplete: newPct };
+    });
+    await projects.update(projectId, { decks: newDecks });
+  }
+
+  return after;
 }
 const monthLabel = (ym) => new Date(ym + "-01T00:00:00").toLocaleDateString(undefined, { month: "long", year: "numeric" });
 const monthLabelShort = (ym) => new Date(ym + "-01T00:00:00").toLocaleDateString(undefined, { month: "short", year: "numeric" });
@@ -1292,7 +1337,7 @@ function TimeView({ ctx }) {
     .sort((a, b) => b.date.localeCompare(a.date));
 
   const save = (form) => {
-    if (form.id) timeEntries.update(form.id, form);
+    if (form.id) updateTimeEntryAndSync(form.id, form, ctx);
     else logTimeEntry(form, ctx);
     setEditing(null);
   };
