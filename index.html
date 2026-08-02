@@ -193,10 +193,10 @@ function useSupabaseSettings() {
 }
 
 /* ---- timer: plain localStorage is fine in a real deployed app ---- */
-function useTimer() {
+function useTimer(storageKey = "cd_activeTimer") {
   const [timer, setTimer] = useState(() => {
     try {
-      const raw = localStorage.getItem("cd_activeTimer");
+      const raw = localStorage.getItem(storageKey);
       return raw ? JSON.parse(raw) : null;
     } catch { return null; }
   });
@@ -208,16 +208,16 @@ function useTimer() {
     return () => clearInterval(id);
   }, [timer]);
 
-  const start = useCallback((projectId, description, deckDesc) => {
-    const t = { projectId, description: description || "", deckDesc: deckDesc || "", startedAt: new Date().toISOString() };
+  const start = useCallback((payload) => {
+    const t = { ...payload, startedAt: new Date().toISOString() };
     setTimer(t);
-    localStorage.setItem("cd_activeTimer", JSON.stringify(t));
-  }, []);
+    localStorage.setItem(storageKey, JSON.stringify(t));
+  }, [storageKey]);
 
   const clear = useCallback(() => {
     setTimer(null);
-    localStorage.removeItem("cd_activeTimer");
-  }, []);
+    localStorage.removeItem(storageKey);
+  }, [storageKey]);
 
   const elapsedMs = timer ? Math.max(0, now - new Date(timer.startedAt).getTime()) : 0;
   return { timer, ready: true, start, clear, elapsedMs };
@@ -425,10 +425,11 @@ function App() {
   const expenses = useCollection("expenses");
   const quotes = useCollection("quotes");
   const projectUpdates = useCollection("project_updates");
+  const personalTime = useCollection("personal_time");
   const settingsHook = useSettings();
 
-  const ctx = { clients, projects, timeEntries, meetings, invoices, clientNotes, comms, expenses, quotes, projectUpdates, settings: settingsHook };
-  const loading = !clients.ready || !projects.ready || !timeEntries.ready || !meetings.ready || !invoices.ready || !clientNotes.ready || !comms.ready || !expenses.ready || !quotes.ready || !projectUpdates.ready || !settingsHook.ready;
+  const ctx = { clients, projects, timeEntries, meetings, invoices, clientNotes, comms, expenses, quotes, projectUpdates, personalTime, settings: settingsHook };
+  const loading = !clients.ready || !projects.ready || !timeEntries.ready || !meetings.ready || !invoices.ready || !clientNotes.ready || !comms.ready || !expenses.ready || !quotes.ready || !projectUpdates.ready || !personalTime.ready || !settingsHook.ready;
 
   // Automations: run once per session after data loads — flip overdue invoices,
   // and generate draft retainer invoices for active retainer projects that are due.
@@ -596,7 +597,7 @@ function projectName(projects, id) {
 
 /* ------------------------------ Dashboard ------------------------------ */
 function Dashboard({ ctx, goTo }) {
-  const { clients, projects, timeEntries, meetings, invoices, comms } = ctx;
+  const { clients, projects, timeEntries, meetings, invoices, comms, personalTime } = ctx;
   const [logging, setLogging] = useState(false);
 
   const activeProjects = projects.items.filter((p) => p.status === "active");
@@ -618,6 +619,10 @@ function Dashboard({ ctx, goTo }) {
   });
   const hoursByDay = days.map((iso) => timeEntries.items.filter((t) => t.date === iso).reduce((s, t) => s + Number(t.hours || 0), 0));
   const maxHrs = Math.max(4, ...hoursByDay);
+
+  const weekStartIso = weekStart.toISOString().slice(0, 10);
+  const personalWeekHours = personalTime.items.filter((t) => t.date >= weekStartIso).reduce((s, t) => s + Number(t.hours || 0), 0);
+  const recentPersonal = [...personalTime.items].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
 
   const upcoming = meetings.items
     .filter((m) => m.date >= todayISO())
@@ -647,6 +652,7 @@ function Dashboard({ ctx, goTo }) {
       <div className="cd-stat-row">
         <StatCard label="Active projects" value={activeProjects.length} onClick={() => goTo("projects")} />
         <StatCard label="Unbilled hours" value={fmtHrs(unbilledHours)} onClick={() => goTo("time")} accent="amber" />
+        <StatCard label="Unbillable hours (week)" value={fmtHrs(personalWeekHours)} onClick={() => goTo("time")} />
         <StatCard label="Outstanding" value={outstandingLabel} onClick={() => goTo("billing")} accent="danger" small />
         <StatCard label="Clients on file" value={clients.items.length} onClick={() => goTo("clients")} />
       </div>
@@ -719,6 +725,27 @@ function Dashboard({ ctx, goTo }) {
           )}
         </section>
 
+        <section className="cd-card">
+          <div className="cd-card-head"><h3>Recent personal work</h3></div>
+          {recentPersonal.length === 0 ? (
+            <Empty icon={NotebookPen} title="No personal time logged yet" hint="Track your own projects from the Time tab's Personal &amp; unbillable section." />
+          ) : (
+            <ul className="cd-list">
+              {recentPersonal.map((t) => (
+                <li key={t.id} className="cd-list-row">
+                  <div>
+                    <div className="cd-list-title">{t.title || "Personal work"}</div>
+                    <div className="cd-list-sub">{t.notes || "—"}</div>
+                  </div>
+                  <div className="cd-list-meta mono">{fmtHrs(t.hours)} · {fmtDate(t.date)}</div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      </div>
+
+      <div className="cd-grid-2">
         <section className="cd-card">
           <div className="cd-card-head"><h3>Needs a check-in</h3></div>
           {followUps.length === 0 ? (
@@ -1329,6 +1356,7 @@ function OverviewView({ ctx }) {
 /* ------------------------------ Time ------------------------------ */
 function TimeView({ ctx }) {
   const { clients, projects, timeEntries } = ctx;
+  const [section, setSection] = useState("client"); // client | personal
   const [editing, setEditing] = useState(null);
   const [projectFilter, setProjectFilter] = useState("all");
 
@@ -1353,15 +1381,22 @@ function TimeView({ ctx }) {
       <PageHead
         eyebrow="hours"
         title="Time tracking"
-        action={
+        action={section === "client" ? (
           <div className="cd-row-actions">
             <Btn icon={Repeat} onClick={repeatLast} disabled={!lastEntry}>Repeat last entry</Btn>
             <Btn kind="primary" icon={Plus} onClick={() => setEditing("new")} disabled={projects.items.length === 0}>Log time</Btn>
           </div>
-        }
+        ) : null}
       />
 
-      {projects.items.length === 0 ? (
+      <div className="cd-tabs">
+        <button className={"cd-tab" + (section === "client" ? " active" : "")} onClick={() => setSection("client")}>Client hours</button>
+        <button className={"cd-tab" + (section === "personal" ? " active" : "")} onClick={() => setSection("personal")}>Personal &amp; unbillable</button>
+      </div>
+
+      {section === "personal" ? (
+        <PersonalTimeSection ctx={ctx} />
+      ) : projects.items.length === 0 ? (
         <Empty icon={Clock} title="No projects to log against" hint="Create a project first, then log hours here." />
       ) : (
         <>
@@ -1470,7 +1505,7 @@ function TimerCard({ projects, onLog }) {
             </select>
           )}
           <input placeholder="What are you working on?" value={description} onChange={(e) => setDescription(e.target.value)} />
-          <Btn kind="primary" icon={Play} onClick={() => timerHook.start(projectId, description, deckDesc)} disabled={!projectId}>Start</Btn>
+          <Btn kind="primary" icon={Play} onClick={() => timerHook.start({ projectId, description, deckDesc })} disabled={!projectId}>Start</Btn>
         </div>
       )}
     </section>
@@ -1504,6 +1539,113 @@ function TimeForm({ initial, projects, onSave }) {
         <Field label="Hours"><input type="number" min="0" step="0.25" required value={form.hours} onChange={set("hours")} placeholder="2.5" /></Field>
       </div>
       <Field label="Description"><textarea rows={2} value={form.description} onChange={set("description")} placeholder="What did you work on?" /></Field>
+      <div className="cd-form-actions"><Btn kind="primary" type="submit">Save entry</Btn></div>
+    </form>
+  );
+}
+
+function PersonalTimeSection({ ctx }) {
+  const { personalTime } = ctx;
+  const timerHook = useTimer("cd_personalTimer");
+  const [title, setTitle] = useState("");
+  const [editing, setEditing] = useState(null);
+
+  const list = [...personalTime.items].sort((a, b) => b.date.localeCompare(a.date));
+  const weekStart = (() => { const d = new Date(); d.setDate(d.getDate() - d.getDay()); return d.toISOString().slice(0, 10); })();
+  const weekHours = personalTime.items.filter((t) => t.date >= weekStart).reduce((s, t) => s + Number(t.hours || 0), 0);
+  const totalHours = personalTime.items.reduce((s, t) => s + Number(t.hours || 0), 0);
+
+  const fmtElapsed = (ms) => {
+    const totalSec = Math.floor(ms / 1000);
+    const h = String(Math.floor(totalSec / 3600)).padStart(2, "0");
+    const m = String(Math.floor((totalSec % 3600) / 60)).padStart(2, "0");
+    const s = String(totalSec % 60).padStart(2, "0");
+    return `${h}:${m}:${s}`;
+  };
+
+  const stopTimer = () => {
+    const hours = Math.max(0.01, Math.round((timerHook.elapsedMs / 3600000) * 100) / 100);
+    personalTime.add({ date: todayISO(), hours, title: timerHook.timer.title, notes: "" });
+    timerHook.clear();
+  };
+
+  const save = (form) => {
+    if (form.id) personalTime.update(form.id, form);
+    else personalTime.add(form);
+    setEditing(null);
+  };
+
+  return (
+    <>
+      <div className="cd-stat-row" style={{ gridTemplateColumns: "repeat(2, 1fr)" }}>
+        <StatCard label="Personal hours this week" value={fmtHrs(weekHours)} />
+        <StatCard label="Personal hours all time" value={fmtHrs(totalHours)} />
+      </div>
+
+      <section className="cd-card cd-timer-card">
+        <div className="cd-card-head"><h3>Personal timer</h3></div>
+        {timerHook.timer ? (
+          <div className="cd-timer-active">
+            <div className="cd-timer-clock mono">{fmtElapsed(timerHook.elapsedMs)}</div>
+            <div className="cd-timer-meta">{timerHook.timer.title || "Personal work"}</div>
+            <Btn kind="primary" icon={Pause} onClick={stopTimer}>Stop &amp; log</Btn>
+          </div>
+        ) : (
+          <div className="cd-timer-idle">
+            <input placeholder="What are you working on?" value={title} onChange={(e) => setTitle(e.target.value)} />
+            <Btn kind="primary" icon={Play} onClick={() => timerHook.start({ title })}>Start</Btn>
+          </div>
+        )}
+      </section>
+
+      <div className="cd-form-actions" style={{ justifyContent: "flex-start" }}>
+        <Btn kind="primary" icon={Plus} onClick={() => setEditing("new")}>Log personal time</Btn>
+      </div>
+
+      {list.length === 0 ? (
+        <Empty icon={NotebookPen} title="No personal time logged yet" hint="Track hours on your own projects here — separate from client billing." />
+      ) : (
+        <table className="cd-table">
+          <thead><tr><th>Date</th><th>Working on</th><th>Notes</th><th>Hours</th><th /></tr></thead>
+          <tbody>
+            {list.map((t) => (
+              <tr key={t.id}>
+                <td className="mono">{fmtDate(t.date)}</td>
+                <td>{t.title || "—"}</td>
+                <td className="cd-td-desc">{t.notes || "—"}</td>
+                <td className="mono">{fmtHrs(t.hours)}</td>
+                <td>
+                  <div className="cd-row-actions">
+                    <button className="cd-iconbtn" onClick={() => setEditing(t)}><Pencil size={14} /></button>
+                    <button className="cd-iconbtn danger" onClick={() => personalTime.remove(t.id)}><Trash2 size={14} /></button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {editing && (
+        <Modal title={editing === "new" ? "Log personal time" : "Edit personal time"} onClose={() => setEditing(null)}>
+          <PersonalTimeForm initial={editing === "new" ? null : editing} onSave={save} />
+        </Modal>
+      )}
+    </>
+  );
+}
+
+function PersonalTimeForm({ initial, onSave }) {
+  const [form, setForm] = useState(initial || { date: todayISO(), hours: "", title: "", notes: "" });
+  const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+  return (
+    <form className="cd-form" onSubmit={(e) => { e.preventDefault(); onSave({ ...form, hours: Number(form.hours) || 0 }); }}>
+      <div className="cd-form-row">
+        <Field label="Date"><input type="date" required value={form.date} onChange={set("date")} /></Field>
+        <Field label="Hours"><input type="number" min="0" step="0.25" required value={form.hours} onChange={set("hours")} placeholder="2.5" /></Field>
+      </div>
+      <Field label="Working on"><input value={form.title} onChange={set("title")} placeholder="e.g. Portfolio site, learning React Native…" /></Field>
+      <Field label="Notes"><textarea rows={3} value={form.notes} onChange={set("notes")} placeholder="What did you actually work on?" /></Field>
       <div className="cd-form-actions"><Btn kind="primary" type="submit">Save entry</Btn></div>
     </form>
   );
@@ -2799,7 +2941,7 @@ const CSS = `
 .cd-eyebrow{font-family:var(--font-mono);font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--amber);margin-bottom:4px;}
 .cd-pagehead h1{font-family:var(--font-display);font-size:28px;font-weight:700;margin:0;color:var(--petrol);}
 
-.cd-stat-row{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;}
+.cd-stat-row{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;}
 .cd-stat{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px 18px;text-align:left;cursor:pointer;font-family:var(--font-body);transition:border-color .15s;}
 .cd-stat:hover{border-color:var(--accent);}
 .cd-stat-value{font-family:var(--font-mono);font-size:22px;font-weight:600;}
