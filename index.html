@@ -227,22 +227,25 @@ function useTimer(storageKey = "cd_activeTimer") {
 function useAuth() {
   const [session, setSession] = useState(null);
   const [ready, setReady] = useState(false);
+  const [passwordRecovery, setPasswordRecovery] = useState(false);
 
   useEffect(() => {
     sb.auth.getSession().then(({ data }) => {
       setSession(data.session);
       setReady(true);
     });
-    const { data: sub } = sb.auth.onAuthStateChange((_event, sess) => {
+    const { data: sub } = sb.auth.onAuthStateChange((event, sess) => {
       setSession(sess);
+      if (event === "PASSWORD_RECOVERY") setPasswordRecovery(true);
     });
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  return { session, ready };
+  return { session, ready, passwordRecovery, clearPasswordRecovery: () => setPasswordRecovery(false) };
 }
 
 function LoginScreen() {
+  const [mode, setMode] = useState("signin"); // signin | reset-request | reset-sent
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -257,23 +260,113 @@ function LoginScreen() {
     if (error) setError(error.message);
   };
 
+  const submitReset = async (e) => {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+    const { error } = await sb.auth.resetPasswordForEmail(email, {
+      redirectTo: window.location.origin + window.location.pathname,
+    });
+    setLoading(false);
+    if (error) setError(error.message);
+    else setMode("reset-sent");
+  };
+
+  return (
+    <div className="cd-login-root">
+      <style>{LOGIN_CSS}</style>
+
+      {mode === "signin" && (
+        <form className="cd-login-card" onSubmit={submit}>
+          <img src={LOGO_DATA_URI} alt="ihubSA" className="cd-login-logo" />
+          <div className="cd-login-sub">Sign in to your billing &amp; ops ledger</div>
+          <label className="cd-login-field">
+            <span>Email</span>
+            <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} autoFocus />
+          </label>
+          <label className="cd-login-field">
+            <span>Password</span>
+            <input type="password" required value={password} onChange={(e) => setPassword(e.target.value)} />
+          </label>
+          {error && <div className="cd-login-error">{error}</div>}
+          <button className="cd-login-btn" type="submit" disabled={loading}>
+            {loading ? "Signing in…" : "Sign in"}
+          </button>
+          <button type="button" className="cd-login-link" onClick={() => { setMode("reset-request"); setError(""); }}>
+            Forgot password?
+          </button>
+        </form>
+      )}
+
+      {mode === "reset-request" && (
+        <form className="cd-login-card" onSubmit={submitReset}>
+          <img src={LOGO_DATA_URI} alt="ihubSA" className="cd-login-logo" />
+          <div className="cd-login-sub">Reset your password</div>
+          <label className="cd-login-field">
+            <span>Email</span>
+            <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} autoFocus placeholder="prontodigitalsa@gmail.com" />
+          </label>
+          {error && <div className="cd-login-error">{error}</div>}
+          <button className="cd-login-btn" type="submit" disabled={loading}>
+            {loading ? "Sending…" : "Send reset link"}
+          </button>
+          <button type="button" className="cd-login-link" onClick={() => { setMode("signin"); setError(""); }}>
+            Back to sign in
+          </button>
+        </form>
+      )}
+
+      {mode === "reset-sent" && (
+        <div className="cd-login-card">
+          <img src={LOGO_DATA_URI} alt="ihubSA" className="cd-login-logo" />
+          <div className="cd-login-sub">Check your email</div>
+          <p style={{ fontSize: 13, color: "#5B616E", textAlign: "center", margin: 0 }}>
+            If an account exists for <strong>{email}</strong>, a password reset link is on its way. Open it on this device to set a new password.
+          </p>
+          <button type="button" className="cd-login-link" onClick={() => setMode("signin")}>
+            Back to sign in
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ResetPasswordScreen({ onDone }) {
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setError("");
+    if (password.length < 6) { setError("Password should be at least 6 characters."); return; }
+    if (password !== confirm) { setError("Passwords don't match."); return; }
+    setLoading(true);
+    const { error } = await sb.auth.updateUser({ password });
+    setLoading(false);
+    if (error) setError(error.message);
+    else onDone();
+  };
+
   return (
     <div className="cd-login-root">
       <style>{LOGIN_CSS}</style>
       <form className="cd-login-card" onSubmit={submit}>
         <img src={LOGO_DATA_URI} alt="ihubSA" className="cd-login-logo" />
-        <div className="cd-login-sub">Sign in to your billing &amp; ops ledger</div>
+        <div className="cd-login-sub">Set a new password</div>
         <label className="cd-login-field">
-          <span>Email</span>
-          <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} autoFocus />
+          <span>New password</span>
+          <input type="password" required value={password} onChange={(e) => setPassword(e.target.value)} autoFocus />
         </label>
         <label className="cd-login-field">
-          <span>Password</span>
-          <input type="password" required value={password} onChange={(e) => setPassword(e.target.value)} />
+          <span>Confirm new password</span>
+          <input type="password" required value={confirm} onChange={(e) => setConfirm(e.target.value)} />
         </label>
         {error && <div className="cd-login-error">{error}</div>}
         <button className="cd-login-btn" type="submit" disabled={loading}>
-          {loading ? "Signing in…" : "Sign in"}
+          {loading ? "Saving…" : "Save new password"}
         </button>
       </form>
     </div>
@@ -291,6 +384,7 @@ const LOGIN_CSS = `
 .cd-login-error{font-size:12.5px;color:#B23A3A;background:#F6DEDD;border-radius:7px;padding:8px 10px;}
 .cd-login-btn{margin-top:4px;background:#073E6B;color:#fff;border:none;border-radius:8px;padding:10px;font-size:14px;font-weight:600;cursor:pointer;}
 .cd-login-btn:disabled{opacity:0.6;cursor:not-allowed;}
+.cd-login-link{background:none;border:none;color:#073E6B;font-size:12.5px;cursor:pointer;text-decoration:underline;padding:2px 0;}
 `;
 
 // table names, kept as constants so App() below reads exactly like the
@@ -3698,7 +3792,7 @@ const CSS = `
 
 /* ------------------------------ auth gate ------------------------------ */
 function Root() {
-  const { session, ready } = useAuth();
+  const { session, ready, passwordRecovery, clearPasswordRecovery } = useAuth();
 
   if (!ready) {
     return (
@@ -3708,6 +3802,7 @@ function Root() {
     );
   }
 
+  if (passwordRecovery) return <ResetPasswordScreen onDone={clearPasswordRecovery} />;
   if (!session) return <LoginScreen />;
 
   return <App />;
