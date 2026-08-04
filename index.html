@@ -26,7 +26,7 @@ const DollarSign = mkIcon("$"); const Play = mkIcon("▶"); const Pause = mkIcon
 const FileText = mkIcon("📄"); const Send = mkIcon("➤"); const CircleCheck = mkIcon("✔");
 const AlertCircle = mkIcon("!"); const Settings = mkIcon("⚙"); const NotebookPen = mkIcon("📝");
 const Printer = mkIcon("🖶"); const BarChart3 = mkIcon("📊"); const Repeat = mkIcon("↻");
-const UserCheck = mkIcon("🙋"); const LogOut = mkIcon("⎋"); const BookOpen = mkIcon("📖"); const ExternalLink = mkIcon("↗"); const FileSignature = mkIcon("📋"); const Layers = mkIcon("🗂"); const Lightbulb = mkIcon("💡"); const Eraser = mkIcon("🧹"); const Undo2 = mkIcon("↩");
+const UserCheck = mkIcon("🙋"); const LogOut = mkIcon("⎋"); const BookOpen = mkIcon("📖"); const ExternalLink = mkIcon("↗"); const FileSignature = mkIcon("📋"); const Layers = mkIcon("🗂"); const Lightbulb = mkIcon("💡"); const Eraser = mkIcon("🧹"); const Undo2 = mkIcon("↩"); const UserCog = mkIcon("🧑‍💼");
 
 /* ---- Supabase client (loaded from CDN as window.supabase) ---- */
 const SUPABASE_URL = "https://ziladpnlfajtiboavwvn.supabase.co";
@@ -523,13 +523,14 @@ const monthLabelShort = (ym) => new Date(ym + "-01T00:00:00").toLocaleDateString
 const STATUS_COLORS = {
   active: "var(--accent)", paused: "var(--amber)", completed: "var(--ink-soft)",
   draft: "var(--ink-soft)", sent: "var(--amber)", paid: "var(--success)", overdue: "var(--danger)",
-  accepted: "var(--success)", declined: "var(--danger)", expired: "var(--ink-soft)", deployed: "var(--success)",
+  accepted: "var(--success)", declined: "var(--danger)", expired: "var(--ink-soft)", deployed: "var(--success)", inactive: "var(--ink-soft)",
 };
 
 /* ------------------------------ shell UI ------------------------------ */
 const NAV = [
   { key: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { key: "clients", label: "Clients", icon: Users },
+  { key: "employees", label: "Team", icon: UserCog },
   { key: "projects", label: "Projects", icon: FolderKanban },
   { key: "overview", label: "Overview", icon: Layers },
   { key: "time", label: "Time", icon: Clock },
@@ -558,10 +559,11 @@ function App() {
   const projectUpdates = useCollection("project_updates");
   const personalTime = useCollection("personal_time");
   const concepts = useCollection("concepts");
+  const employees = useCollection("employees");
   const settingsHook = useSettings();
 
-  const ctx = { clients, projects, timeEntries, meetings, invoices, clientNotes, comms, expenses, quotes, projectUpdates, personalTime, concepts, settings: settingsHook };
-  const loading = !clients.ready || !projects.ready || !timeEntries.ready || !meetings.ready || !invoices.ready || !clientNotes.ready || !comms.ready || !expenses.ready || !quotes.ready || !projectUpdates.ready || !personalTime.ready || !concepts.ready || !settingsHook.ready;
+  const ctx = { clients, projects, timeEntries, meetings, invoices, clientNotes, comms, expenses, quotes, projectUpdates, personalTime, concepts, employees, settings: settingsHook };
+  const loading = !clients.ready || !projects.ready || !timeEntries.ready || !meetings.ready || !invoices.ready || !clientNotes.ready || !comms.ready || !expenses.ready || !quotes.ready || !projectUpdates.ready || !personalTime.ready || !concepts.ready || !employees.ready || !settingsHook.ready;
 
   // Automations: run once per session after data loads — flip overdue invoices,
   // and generate draft retainer invoices for active retainer projects that are due.
@@ -637,6 +639,7 @@ function App() {
           <>
             {tab === "dashboard" && <Dashboard ctx={ctx} goTo={setTab} />}
             {tab === "clients" && <ClientsView ctx={ctx} />}
+            {tab === "employees" && <EmployeesView ctx={ctx} />}
             {tab === "projects" && <ProjectsView ctx={ctx} />}
             {tab === "overview" && <OverviewView ctx={ctx} />}
             {tab === "time" && <TimeView ctx={ctx} />}
@@ -730,7 +733,7 @@ function projectName(projects, id) {
 
 /* ------------------------------ Dashboard ------------------------------ */
 function Dashboard({ ctx, goTo }) {
-  const { clients, projects, timeEntries, meetings, invoices, comms, personalTime } = ctx;
+  const { clients, projects, timeEntries, meetings, invoices, comms, personalTime, employees } = ctx;
   const [logging, setLogging] = useState(false);
 
   const activeProjects = projects.items.filter((p) => p.status === "active");
@@ -901,7 +904,7 @@ function Dashboard({ ctx, goTo }) {
 
       {logging && (
         <Modal title="Log time" onClose={() => setLogging(false)}>
-          <TimeForm initial={null} projects={projects.items} onSave={(form) => { logTimeEntry(form, ctx); setLogging(false); }} />
+          <TimeForm initial={null} projects={projects.items} employees={employees.items} onSave={(form) => { logTimeEntry(form, ctx); setLogging(false); }} />
         </Modal>
       )}
     </div>
@@ -1063,9 +1066,100 @@ function ClientForm({ initial, onSave }) {
   );
 }
 
+/* ------------------------------ Employees ------------------------------ */
+function EmployeesView({ ctx }) {
+  const { employees, projects, timeEntries } = ctx;
+  const [editing, setEditing] = useState(null);
+
+  const save = (form) => {
+    if (form.id) employees.update(form.id, form);
+    else employees.add(form);
+    setEditing(null);
+  };
+
+  return (
+    <div className="cd-page">
+      <PageHead
+        eyebrow="team"
+        title="Team"
+        action={<Btn kind="primary" icon={Plus} onClick={() => setEditing("new")}>New team member</Btn>}
+      />
+
+      {employees.items.length === 0 ? (
+        <Empty icon={UserCog} title="No team members yet" hint="Add people here, then assign them to a project or specific decks from the Projects tab." />
+      ) : (
+        <div className="cd-cardgrid">
+          {employees.items.map((e) => {
+            const assignedProjects = projects.items.filter((p) => (p.assignedEmployeeIds || []).includes(e.id));
+            const hoursLogged = timeEntries.items.filter((t) => t.employeeId === e.id).reduce((s, t) => s + Number(t.hours || 0), 0);
+            return (
+              <div className="cd-card" key={e.id}>
+                <div className="cd-card-head">
+                  <div>
+                    <h3>{e.name}</h3>
+                    <div className="cd-list-sub">{e.role || "—"}</div>
+                  </div>
+                  <div className="cd-row-actions">
+                    <Stamp status={e.status} />
+                    <button className="cd-iconbtn" onClick={() => setEditing(e)}><Pencil size={14} /></button>
+                    <button className="cd-iconbtn danger" onClick={() => { if (confirm(`Remove ${e.name}?`)) employees.remove(e.id); }}><Trash2 size={14} /></button>
+                  </div>
+                </div>
+                <div className="cd-kv"><span>Email</span><span>{e.email || "—"}</span></div>
+                <div className="cd-kv"><span>Phone</span><span>{e.phone || "—"}</span></div>
+                {e.hourlyRate ? <div className="cd-kv"><span>Rate</span><span className="mono">{fmtMoney(e.hourlyRate, e.currency)}/hr</span></div> : null}
+                <div className="cd-kv"><span>Assigned projects</span><span>{assignedProjects.length}</span></div>
+                <div className="cd-kv"><span>Hours logged</span><span className="mono">{fmtHrs(hoursLogged)}</span></div>
+                {e.notes && <div className="cd-notes">{e.notes}</div>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {editing && (
+        <Modal title={editing === "new" ? "New team member" : "Edit team member"} onClose={() => setEditing(null)}>
+          <EmployeeForm initial={editing === "new" ? null : editing} onSave={save} />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function EmployeeForm({ initial, onSave }) {
+  const [form, setForm] = useState(initial || { name: "", email: "", phone: "", role: "", hourlyRate: "", currency: "USD", status: "active", notes: "" });
+  const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+  return (
+    <form className="cd-form" onSubmit={(e) => { e.preventDefault(); onSave({ ...form, hourlyRate: form.hourlyRate ? Number(form.hourlyRate) : "" }); }}>
+      <Field label="Name"><input required value={form.name} onChange={set("name")} placeholder="Jamie Reyes" /></Field>
+      <Field label="Role / title"><input value={form.role} onChange={set("role")} placeholder="Frontend Developer" /></Field>
+      <div className="cd-form-row">
+        <Field label="Email"><input type="email" value={form.email} onChange={set("email")} /></Field>
+        <Field label="Phone"><input value={form.phone} onChange={set("phone")} /></Field>
+      </div>
+      <div className="cd-form-row">
+        <Field label="Hourly rate (optional)"><input type="number" min="0" step="1" value={form.hourlyRate} onChange={set("hourlyRate")} /></Field>
+        <Field label="Currency">
+          <select value={form.currency} onChange={set("currency")}>
+            {CURRENCY_CODES.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </Field>
+        <Field label="Status">
+          <select value={form.status} onChange={set("status")}>
+            <option value="active">active</option>
+            <option value="inactive">inactive</option>
+          </select>
+        </Field>
+      </div>
+      <Field label="Notes"><textarea rows={3} value={form.notes} onChange={set("notes")} placeholder="Skills, availability, anything useful…" /></Field>
+      <div className="cd-form-actions"><Btn kind="primary" type="submit">Save</Btn></div>
+    </form>
+  );
+}
+
 /* ------------------------------ Projects ------------------------------ */
 function ProjectsView({ ctx }) {
-  const { clients, projects, timeEntries, quotes, projectUpdates, settings } = ctx;
+  const { clients, projects, timeEntries, quotes, projectUpdates, employees, settings } = ctx;
   const [editing, setEditing] = useState(null);
   const [tracking, setTracking] = useState(null); // project being tracked
   const [filter, setFilter] = useState("all");
@@ -1101,6 +1195,7 @@ function ProjectsView({ ctx }) {
           {list.map((p) => {
             const hrs = timeEntries.items.filter((t) => t.projectId === p.id).reduce((s, t) => s + Number(t.hours || 0), 0);
             const pct = p.budgetHours ? Math.min(100, (hrs / p.budgetHours) * 100) : null;
+            const assigned = employees.items.filter((e) => (p.assignedEmployeeIds || []).includes(e.id));
             return (
               <div className="cd-card" key={p.id}>
                 <div className="cd-card-head">
@@ -1119,6 +1214,7 @@ function ProjectsView({ ctx }) {
                 <div className="cd-kv"><span>Hours logged</span><span className="mono">{fmtHrs(hrs)}{p.budgetHours ? ` / ${p.budgetHours}h` : ""}</span></div>
                 <div className="cd-kv"><span>Priority</span><span className="mono">{p.priority ? `#${p.priority}` : "unset"}</span></div>
                 <div className="cd-kv"><span>Start date</span><span className="mono">{p.startDate ? fmtDate(p.startDate) : "unset"}</span></div>
+                <div className="cd-kv"><span>Assigned to</span><span>{assigned.length ? assigned.map((e) => e.name).join(", ") : "—"}</span></div>
                 {p.isRetainer && (
                   <div className="cd-kv"><span>Retainer</span><span className="mono">{fmtMoney(p.retainerAmount, p.currency)}/mo · day {p.retainerDay}</span></div>
                 )}
@@ -1137,7 +1233,7 @@ function ProjectsView({ ctx }) {
 
       {editing && (
         <Modal title={editing === "new" ? "New project" : "Edit project"} onClose={() => setEditing(null)}>
-          <ProjectForm initial={editing === "new" ? null : editing} clients={clients.items} defaultRate={settings.settings.defaultHourlyRate} defaultCurrency={settings.settings.defaultCurrency} onSave={save} />
+          <ProjectForm initial={editing === "new" ? null : editing} clients={clients.items} employees={employees.items} defaultRate={settings.settings.defaultHourlyRate} defaultCurrency={settings.settings.defaultCurrency} onSave={save} />
         </Modal>
       )}
 
@@ -1148,6 +1244,8 @@ function ProjectsView({ ctx }) {
             quotes={quotes.items}
             projects={projects}
             updates={projectUpdates}
+            employees={employees.items}
+            timeEntries={timeEntries.items}
             hoursPerDay={settings.settings.hoursPerProjectDay}
           />
         </Modal>
@@ -1156,12 +1254,16 @@ function ProjectsView({ ctx }) {
   );
 }
 
-function ProjectForm({ initial, clients, defaultRate, defaultCurrency, onSave }) {
+function ProjectForm({ initial, clients, employees, defaultRate, defaultCurrency, onSave }) {
   const [form, setForm] = useState(initial || {
     name: "", clientId: clients[0]?.id || "", status: "active", hourlyRate: defaultRate ?? 100, currency: defaultCurrency || "USD", budgetHours: "", notes: "",
-    isRetainer: false, retainerAmount: "", retainerDay: 1, priority: "", startDate: todayISO(),
+    isRetainer: false, retainerAmount: "", retainerDay: 1, priority: "", startDate: todayISO(), assignedEmployeeIds: [],
   });
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+  const toggleEmployee = (id) => {
+    const current = form.assignedEmployeeIds || [];
+    setForm({ ...form, assignedEmployeeIds: current.includes(id) ? current.filter((x) => x !== id) : [...current, id] });
+  };
   return (
     <form className="cd-form" onSubmit={(e) => {
       e.preventDefault();
@@ -1202,6 +1304,22 @@ function ProjectForm({ initial, clients, defaultRate, defaultCurrency, onSave })
       </div>
       <Field label="Notes"><textarea rows={3} value={form.notes} onChange={set("notes")} placeholder="Scope, stack, links…" /></Field>
 
+      {employees && employees.length > 0 && (
+        <>
+          <div className="cd-subhead" style={{ marginTop: 6 }}>Assigned to</div>
+          <div className="cd-checklist">
+            {employees.map((emp) => (
+              <li key={emp.id} style={{ listStyle: "none" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <input type="checkbox" checked={(form.assignedEmployeeIds || []).includes(emp.id)} onChange={() => toggleEmployee(emp.id)} />
+                  <span>{emp.name}{emp.role ? ` — ${emp.role}` : ""}</span>
+                </label>
+              </li>
+            ))}
+          </div>
+        </>
+      )}
+
       <div className="cd-subhead" style={{ marginTop: 6 }}>Retainer billing</div>
       <label className="cd-checkbox-row">
         <input type="checkbox" checked={!!form.isRetainer} onChange={(e) => setForm({ ...form, isRetainer: e.target.checked })} />
@@ -1220,7 +1338,7 @@ function ProjectForm({ initial, clients, defaultRate, defaultCurrency, onSave })
 }
 
 /* ------------------------------ Project Tracker ------------------------------ */
-function ProjectTracker({ project, quotes, projects, updates, hoursPerDay }) {
+function ProjectTracker({ project, quotes, projects, updates, employees, timeEntries, hoursPerDay }) {
   const [decks, setDecks] = useState(project.decks || []);
   const linkedQuote = quotes.find((q) => q.id === project.quoteId);
   const [linkQuoteId, setLinkQuoteId] = useState("");
@@ -1350,6 +1468,23 @@ function ProjectTracker({ project, quotes, projects, updates, hoursPerDay }) {
                       ? `Projected: ${fmtDate(sched.startDate)} → ${fmtDate(sched.endDate)} (${sched.remainingHours.toFixed(1)}h remaining)`
                       : "Complete — no remaining time projected"}
                   </div>
+                  {employees && employees.length > 0 && (
+                    <div className="cd-gantt-assignee">
+                      <span>Assigned to:</span>
+                      <select
+                        value={d.assignedEmployeeId || ""}
+                        onChange={(e) => { const next = decks.map((dd, idx) => idx === i ? { ...dd, assignedEmployeeId: e.target.value } : dd); setDecks(next); persistDecks(next); }}
+                      >
+                        <option value="">Unassigned</option>
+                        {employees.map((emp) => <option key={emp.id} value={emp.id}>{emp.name}</option>)}
+                      </select>
+                      {d.assignedEmployeeId && timeEntries && (
+                        <span className="mono">
+                          · {fmtHrs(timeEntries.filter((t) => t.projectId === project.id && t.deckDesc === d.desc && t.employeeId === d.assignedEmployeeId).reduce((s, t) => s + Number(t.hours || 0), 0))} logged
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -1634,7 +1769,7 @@ function OverviewView({ ctx }) {
 
 /* ------------------------------ Time ------------------------------ */
 function TimeView({ ctx }) {
-  const { clients, projects, timeEntries } = ctx;
+  const { clients, projects, timeEntries, employees } = ctx;
   const [section, setSection] = useState("client"); // client | personal
   const [editing, setEditing] = useState(null);
   const [projectFilter, setProjectFilter] = useState("all");
@@ -1679,7 +1814,7 @@ function TimeView({ ctx }) {
         <Empty icon={Clock} title="No projects to log against" hint="Create a project first, then log hours here." />
       ) : (
         <>
-          <TimerCard projects={projects.items} onLog={(entry) => logTimeEntry(entry, ctx)} />
+          <TimerCard projects={projects.items} employees={employees.items} onLog={(entry) => logTimeEntry(entry, ctx)} />
 
           <div className="cd-searchbar">
             <select value={projectFilter} onChange={(e) => setProjectFilter(e.target.value)}>
@@ -1693,17 +1828,19 @@ function TimeView({ ctx }) {
           ) : (
             <table className="cd-table">
               <thead>
-                <tr><th>Date</th><th>Project</th><th>Client</th><th>Description</th><th>Hours</th><th>Billed</th><th /></tr>
+                <tr><th>Date</th><th>Project</th><th>Client</th><th>Description</th><th>Who</th><th>Hours</th><th>Billed</th><th /></tr>
               </thead>
               <tbody>
                 {list.map((t) => {
                   const proj = projects.items.find((p) => p.id === t.projectId);
+                  const emp = t.employeeId ? employees.items.find((e) => e.id === t.employeeId) : null;
                   return (
                     <tr key={t.id}>
                       <td className="mono">{fmtDate(t.date)}</td>
                       <td>{proj?.name || "—"}</td>
                       <td>{clientName(clients, proj?.clientId)}</td>
                       <td className="cd-td-desc">{t.description || "—"}</td>
+                      <td>{emp ? emp.name : "Me"}</td>
                       <td className="mono">{fmtHrs(t.hours)}</td>
                       <td>{t.billed ? <Stamp status="paid" /> : <Stamp status="draft" />}</td>
                       <td>
@@ -1723,17 +1860,18 @@ function TimeView({ ctx }) {
 
       {editing && (
         <Modal title={editing === "new" ? "Log time" : "Edit time entry"} onClose={() => setEditing(null)}>
-          <TimeForm initial={editing === "new" ? null : editing} projects={projects.items} onSave={save} />
+          <TimeForm initial={editing === "new" ? null : editing} projects={projects.items} employees={employees.items} onSave={save} />
         </Modal>
       )}
     </div>
   );
 }
 
-function TimerCard({ projects, onLog }) {
+function TimerCard({ projects, employees, onLog }) {
   const timerHook = useTimer();
   const [projectId, setProjectId] = useState(projects[0]?.id || "");
   const [deckDesc, setDeckDesc] = useState("");
+  const [employeeId, setEmployeeId] = useState("");
   const [description, setDescription] = useState("");
 
   if (!timerHook.ready) return null;
@@ -1750,14 +1888,22 @@ function TimerCard({ projects, onLog }) {
     const hours = Math.max(0.01, Math.round((timerHook.elapsedMs / 3600000) * 100) / 100);
     onLog({
       projectId: timerHook.timer.projectId, date: todayISO(), hours,
-      description: timerHook.timer.description, deckDesc: timerHook.timer.deckDesc || "", billed: false,
+      description: timerHook.timer.description, deckDesc: timerHook.timer.deckDesc || "",
+      employeeId: timerHook.timer.employeeId || "", billed: false,
     });
     timerHook.clear();
   };
 
   const activeProject = timerHook.timer ? projects.find((p) => p.id === timerHook.timer.projectId) : null;
+  const activeEmployee = timerHook.timer?.employeeId ? employees?.find((e) => e.id === timerHook.timer.employeeId) : null;
   const selectedProject = projects.find((p) => p.id === projectId);
   const deckOptions = (selectedProject?.decks || []).filter((d) => d.desc);
+
+  const selectDeck = (desc) => {
+    setDeckDesc(desc);
+    const deck = deckOptions.find((d) => d.desc === desc);
+    if (deck?.assignedEmployeeId) setEmployeeId(deck.assignedEmployeeId);
+  };
 
   return (
     <section className="cd-card cd-timer-card">
@@ -1768,6 +1914,7 @@ function TimerCard({ projects, onLog }) {
           <div className="cd-timer-meta">
             {activeProject?.name || "—"}
             {timerHook.timer.deckDesc ? ` — ${timerHook.timer.deckDesc}` : ""}
+            {activeEmployee ? ` · ${activeEmployee.name}` : ""}
             {timerHook.timer.description ? ` · ${timerHook.timer.description}` : ""}
           </div>
           <Btn kind="primary" icon={Pause} onClick={stop}>Stop &amp; log</Btn>
@@ -1778,26 +1925,37 @@ function TimerCard({ projects, onLog }) {
             {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
           {deckOptions.length > 0 && (
-            <select value={deckDesc} onChange={(e) => setDeckDesc(e.target.value)}>
+            <select value={deckDesc} onChange={(e) => selectDeck(e.target.value)}>
               <option value="">No specific deck</option>
               {deckOptions.map((d, i) => <option key={i} value={d.desc}>{d.desc}</option>)}
             </select>
           )}
+          {employees && employees.length > 0 && (
+            <select value={employeeId} onChange={(e) => setEmployeeId(e.target.value)}>
+              <option value="">Me</option>
+              {employees.map((emp) => <option key={emp.id} value={emp.id}>{emp.name}</option>)}
+            </select>
+          )}
           <input placeholder="What are you working on?" value={description} onChange={(e) => setDescription(e.target.value)} />
-          <Btn kind="primary" icon={Play} onClick={() => timerHook.start({ projectId, description, deckDesc })} disabled={!projectId}>Start</Btn>
+          <Btn kind="primary" icon={Play} onClick={() => timerHook.start({ projectId, description, deckDesc, employeeId })} disabled={!projectId}>Start</Btn>
         </div>
       )}
     </section>
   );
 }
 
-function TimeForm({ initial, projects, onSave }) {
+function TimeForm({ initial, projects, employees, onSave }) {
   const [form, setForm] = useState(initial || {
-    projectId: projects[0]?.id || "", date: todayISO(), hours: "", description: "", deckDesc: "", billed: false,
+    projectId: projects[0]?.id || "", date: todayISO(), hours: "", description: "", deckDesc: "", employeeId: "", billed: false,
   });
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
   const selectedProject = projects.find((p) => p.id === form.projectId);
   const deckOptions = (selectedProject?.decks || []).filter((d) => d.desc);
+  const selectDeck = (e) => {
+    const desc = e.target.value;
+    const deck = deckOptions.find((d) => d.desc === desc);
+    setForm({ ...form, deckDesc: desc, employeeId: deck?.assignedEmployeeId || form.employeeId });
+  };
   return (
     <form className="cd-form" onSubmit={(e) => { e.preventDefault(); onSave({ ...form, hours: Number(form.hours) || 0 }); }}>
       <Field label="Project">
@@ -1807,9 +1965,17 @@ function TimeForm({ initial, projects, onSave }) {
       </Field>
       {deckOptions.length > 0 && (
         <Field label="Deck (optional)">
-          <select value={form.deckDesc} onChange={set("deckDesc")}>
+          <select value={form.deckDesc} onChange={selectDeck}>
             <option value="">No specific deck</option>
             {deckOptions.map((d, i) => <option key={i} value={d.desc}>{d.desc}</option>)}
+          </select>
+        </Field>
+      )}
+      {employees && employees.length > 0 && (
+        <Field label="Who did this work?">
+          <select value={form.employeeId} onChange={set("employeeId")}>
+            <option value="">Me</option>
+            {employees.map((emp) => <option key={emp.id} value={emp.id}>{emp.name}</option>)}
           </select>
         </Field>
       )}
@@ -1932,7 +2098,7 @@ function PersonalTimeForm({ initial, onSave }) {
 
 /* ------------------------------ Schedule ------------------------------ */
 function ScheduleView({ ctx }) {
-  const { clients, projects, meetings, timeEntries, clientNotes } = ctx;
+  const { clients, projects, meetings, timeEntries, clientNotes, employees } = ctx;
   const [editing, setEditing] = useState(null);
   const [loggingFor, setLoggingFor] = useState(null); // meeting to log hours for
   const [notingFor, setNotingFor] = useState(null); // meeting to add a note for
@@ -2014,9 +2180,10 @@ function ScheduleView({ ctx }) {
           <TimeForm
             initial={{
               projectId: loggingFor.projectId || projects.items.find((p) => p.clientId === loggingFor.clientId)?.id || "",
-              date: loggingFor.date, hours: "", description: loggingFor.title, meetingId: loggingFor.id, billed: false,
+              date: loggingFor.date, hours: "", description: loggingFor.title, meetingId: loggingFor.id, employeeId: "", billed: false,
             }}
             projects={projects.items.filter((p) => p.clientId === loggingFor.clientId)}
+            employees={employees.items}
             onSave={(form) => { logTimeEntry(form, ctx); setLoggingFor(null); }}
           />
         </Modal>
@@ -3654,6 +3821,8 @@ const CSS = `
 .cd-gantt{display:flex;flex-direction:column;gap:12px;}
 .cd-gantt-item{display:flex;flex-direction:column;gap:3px;}
 .cd-gantt-dates{font-size:11px;color:var(--ink-soft);padding-left:2px;}
+.cd-gantt-assignee{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--ink-soft);padding-left:2px;}
+.cd-gantt-assignee select{font-size:11px;border:1px solid var(--border);border-radius:6px;padding:2px 6px;font-family:var(--font-body);color:var(--ink);background:var(--surface);}
 .cd-gantt-row{display:grid;grid-template-columns:1.4fr 2fr 70px 60px 28px;gap:8px;align-items:center;}
 .cd-gantt-desc{font-size:12.5px;border:1px solid var(--border);border-radius:7px;padding:6px 8px;font-family:var(--font-body);color:var(--ink);background:var(--surface);}
 .cd-gantt-track{height:16px;background:var(--surface-2);border-radius:5px;overflow:hidden;}
