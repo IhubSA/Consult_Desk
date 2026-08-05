@@ -1607,12 +1607,14 @@ function projectCompletion(p, timeEntries) {
 function OverviewView({ ctx }) {
   const { clients, projects, timeEntries, settings } = ctx;
   const [clientFilter, setClientFilter] = useState("all");
+  const [projectFilter, setProjectFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("active");
   const [expanded, setExpanded] = useState({});
 
   const list = projects.items.filter((p) =>
     (statusFilter === "all" || p.status === statusFilter) &&
-    (clientFilter === "all" || p.clientId === clientFilter)
+    (clientFilter === "all" || p.clientId === clientFilter) &&
+    (projectFilter === "all" || p.id === projectFilter)
   ).sort((a, b) => {
     const pa = a.priority == null || a.priority === "" ? Infinity : Number(a.priority);
     const pb = b.priority == null || b.priority === "" ? Infinity : Number(b.priority);
@@ -1623,6 +1625,7 @@ function OverviewView({ ctx }) {
   const toggle = (id) => setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
 
   const selectedClient = clientFilter !== "all" ? clients.items.find((c) => c.id === clientFilter) : null;
+  const clientProjects = clientFilter !== "all" ? projects.items.filter((p) => p.clientId === clientFilter) : [];
 
   const enriched = list.map((p) => {
     const client = clients.items.find((c) => c.id === p.clientId);
@@ -1641,10 +1644,16 @@ function OverviewView({ ctx }) {
       />
 
       <div className="cd-searchbar" style={{ maxWidth: "none", gap: 16 }}>
-        <select value={clientFilter} onChange={(e) => setClientFilter(e.target.value)}>
+        <select value={clientFilter} onChange={(e) => { setClientFilter(e.target.value); setProjectFilter("all"); }}>
           <option value="all">All clients</option>
           {clients.items.map((c) => <option key={c.id} value={c.id}>{c.company || c.name}</option>)}
         </select>
+        {clientFilter !== "all" && (
+          <select value={projectFilter} onChange={(e) => setProjectFilter(e.target.value)}>
+            <option value="all">All projects</option>
+            {clientProjects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        )}
         <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
           <option value="all">All statuses</option>
           <option value="active">Active</option>
