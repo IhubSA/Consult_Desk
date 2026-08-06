@@ -3965,7 +3965,14 @@ const CSS = `
 @media print{
   body *{visibility:hidden;}
   .cd-printable,.cd-printable *{visibility:visible;}
-  .cd-printable{position:absolute;left:0;top:0;width:100%;padding:20px;}
+  .cd-sidebar{display:none;}
+  .cd-page > *:not(.cd-printable):not(.cd-modal-backdrop){display:none;}
+  .cd-main{padding:0;max-width:none;}
+  .cd-modal-backdrop{position:static;display:block;padding:0;}
+  .cd-modal{width:100%;max-width:none;max-height:none;overflow:visible;box-shadow:none;border-radius:0;}
+  .cd-modal-head{display:none;}
+  .cd-modal-body{padding:0;}
+  .cd-printable{width:100%;}
   .cd-printable .cd-form-actions{display:none;}
 }
 
