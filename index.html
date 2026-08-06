@@ -162,6 +162,7 @@ const DEFAULT_SETTINGS = {
   vatNumber: "",
   defaultTaxRate: 0,
   hoursPerProjectDay: 2,
+  defaultQuoteTerms: "",
   paymentTerms: "Payment due within 14 days of invoice date.",
 };
 
@@ -2939,8 +2940,15 @@ function QuoteDoc({ quote, clients, companyName, settings }) {
 
       {quote.notes && (
         <div className="cd-bank-details">
-          <div className="cd-subhead">Terms &amp; notes</div>
+          <div className="cd-subhead">Notes</div>
           <div style={{ fontSize: 12.5, color: "var(--ink-soft)", whiteSpace: "pre-line", marginTop: 4 }}>{quote.notes}</div>
+        </div>
+      )}
+
+      {settings?.defaultQuoteTerms && (
+        <div className="cd-bank-details">
+          <div className="cd-subhead">Terms &amp; conditions</div>
+          <div style={{ fontSize: 11.5, color: "var(--ink-soft)", whiteSpace: "pre-line", marginTop: 4, lineHeight: 1.5 }}>{settings.defaultQuoteTerms}</div>
         </div>
       )}
 
@@ -3723,6 +3731,9 @@ function AdminView({ ctx }) {
           </div>
           <Field label="Payment terms (shown on invoices)">
             <textarea rows={2} value={form.paymentTerms} onChange={set("paymentTerms")} placeholder="Payment due within 14 days of invoice date." />
+          </Field>
+          <Field label="Standard terms &amp; conditions (shown on every quote)">
+            <textarea rows={8} value={form.defaultQuoteTerms} onChange={set("defaultQuoteTerms")} placeholder="Payment terms, revisions, IP rights, confidentiality, etc." />
           </Field>
 
           <div className="cd-subhead" style={{ marginTop: 6 }}>Banking details (shown on invoices)</div>
