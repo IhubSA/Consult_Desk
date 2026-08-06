@@ -521,6 +521,25 @@ async function removeTimeEntryAndSync(id, ctx) {
 const monthLabel = (ym) => new Date(ym + "-01T00:00:00").toLocaleDateString(undefined, { month: "long", year: "numeric" });
 const monthLabelShort = (ym) => new Date(ym + "-01T00:00:00").toLocaleDateString(undefined, { month: "short", year: "numeric" });
 
+// Prints a document (invoice/quote/portfolio report) via a dedicated, minimal
+// print window rather than hiding the rest of the live app in place — this
+// avoids browser quirks with printing content nested inside fixed-position
+// modals or scroll containers, which can otherwise clip or duplicate pages.
+function printDocument(selector) {
+  const el = document.querySelector(selector);
+  if (!el) return;
+  const win = window.open("", "_blank", "width=880,height=1120");
+  if (!win) { alert("Please allow pop-ups for this site to print."); return; }
+  win.document.open();
+  win.document.write(
+    "<!doctype html><html><head><meta charset=\"utf-8\"><title>Print</title><style>" + CSS +
+    "</style><style>body{margin:0;padding:28px;background:#fff;} .cd-form-actions{display:none !important;}</style></head><body>" +
+    el.outerHTML + "</body></html>"
+  );
+  win.document.close();
+  win.onload = () => { win.focus(); win.print(); };
+}
+
 const STATUS_COLORS = {
   active: "var(--accent)", paused: "var(--amber)", completed: "var(--ink-soft)",
   draft: "var(--ink-soft)", sent: "var(--amber)", paid: "var(--success)", overdue: "var(--danger)",
@@ -1641,7 +1660,7 @@ function OverviewView({ ctx }) {
       <PageHead
         eyebrow="portfolio"
         title="Overview"
-        action={<Btn icon={Printer} onClick={() => window.print()}>Print / Save as PDF</Btn>}
+        action={<Btn icon={Printer} onClick={() => printDocument('.cd-printable')}>Print / Save as PDF</Btn>}
       />
 
       <div className="cd-searchbar" style={{ maxWidth: "none", gap: 16 }}>
@@ -2955,7 +2974,7 @@ function QuoteDoc({ quote, clients, companyName, settings }) {
       <div className="cd-doc-footer">This quote is valid until {fmtDate(quote.validUntil)}. Thank you for the opportunity to work together.</div>
 
       <div className="cd-form-actions">
-        <Btn icon={Printer} onClick={() => window.print()}>Print / Save as PDF</Btn>
+        <Btn icon={Printer} onClick={() => printDocument('.cd-printable')}>Print / Save as PDF</Btn>
         <Btn kind="primary" icon={copied ? Check : Copy} onClick={copy}>{copied ? "Copied" : "Copy as text"}</Btn>
       </div>
     </div>
@@ -3306,7 +3325,7 @@ function InvoiceDoc({ invoice, clients, allInvoices, companyName, settings }) {
       <div className="cd-doc-footer">{isReceipt ? "Thank you for your payment." : "Thank you for your business."}</div>
 
       <div className="cd-form-actions">
-        <Btn icon={Printer} onClick={() => window.print()}>Print / Save as PDF</Btn>
+        <Btn icon={Printer} onClick={() => printDocument('.cd-printable')}>Print / Save as PDF</Btn>
         <Btn kind="primary" icon={copied ? Check : Copy} onClick={copy}>{copied ? "Copied" : "Copy as text"}</Btn>
       </div>
     </div>
