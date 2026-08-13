@@ -12,6 +12,7 @@
 <body>
 <div id="root"></div>
 <script type="text/babel">
+
 const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 /* ---- tiny dependency-free stand-ins for the icons used throughout ---- */
@@ -26,7 +27,7 @@ const DollarSign = mkIcon("$"); const Play = mkIcon("▶"); const Pause = mkIcon
 const FileText = mkIcon("📄"); const Send = mkIcon("➤"); const CircleCheck = mkIcon("✔");
 const AlertCircle = mkIcon("!"); const Settings = mkIcon("⚙"); const NotebookPen = mkIcon("📝");
 const Printer = mkIcon("🖶"); const BarChart3 = mkIcon("📊"); const Repeat = mkIcon("↻");
-const UserCheck = mkIcon("🙋"); const LogOut = mkIcon("⎋"); const BookOpen = mkIcon("📖"); const ExternalLink = mkIcon("↗"); const FileSignature = mkIcon("📋"); const Layers = mkIcon("🗂"); const Lightbulb = mkIcon("💡"); const Eraser = mkIcon("🧹"); const Undo2 = mkIcon("↩"); const UserCog = mkIcon("🧑‍💼");
+const UserCheck = mkIcon("🙋"); const LogOut = mkIcon("⎋"); const BookOpen = mkIcon("📖"); const ExternalLink = mkIcon("↗"); const FileSignature = mkIcon("📋"); const Layers = mkIcon("🗂"); const Lightbulb = mkIcon("💡"); const Eraser = mkIcon("🧹"); const Undo2 = mkIcon("↩"); const UserCog = mkIcon("🧑‍💼"); const CheckSquare = mkIcon("✅");
 
 /* ---- Supabase client (loaded from CDN as window.supabase) ---- */
 const SUPABASE_URL = "https://ziladpnlfajtiboavwvn.supabase.co";
@@ -549,6 +550,7 @@ const STATUS_COLORS = {
 /* ------------------------------ shell UI ------------------------------ */
 const NAV = [
   { key: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { key: "todos", label: "Tasks", icon: CheckSquare },
   { key: "clients", label: "Clients", icon: Users },
   { key: "employees", label: "Team", icon: UserCog },
   { key: "projects", label: "Projects", icon: FolderKanban },
@@ -580,10 +582,11 @@ function App() {
   const personalTime = useCollection("personal_time");
   const concepts = useCollection("concepts");
   const employees = useCollection("employees");
+  const todos = useCollection("todos");
   const settingsHook = useSettings();
 
-  const ctx = { clients, projects, timeEntries, meetings, invoices, clientNotes, comms, expenses, quotes, projectUpdates, personalTime, concepts, employees, settings: settingsHook };
-  const loading = !clients.ready || !projects.ready || !timeEntries.ready || !meetings.ready || !invoices.ready || !clientNotes.ready || !comms.ready || !expenses.ready || !quotes.ready || !projectUpdates.ready || !personalTime.ready || !concepts.ready || !employees.ready || !settingsHook.ready;
+  const ctx = { clients, projects, timeEntries, meetings, invoices, clientNotes, comms, expenses, quotes, projectUpdates, personalTime, concepts, employees, todos, settings: settingsHook };
+  const loading = !clients.ready || !projects.ready || !timeEntries.ready || !meetings.ready || !invoices.ready || !clientNotes.ready || !comms.ready || !expenses.ready || !quotes.ready || !projectUpdates.ready || !personalTime.ready || !concepts.ready || !employees.ready || !todos.ready || !settingsHook.ready;
 
   // Automations: run once per session after data loads — flip overdue invoices,
   // and generate draft retainer invoices for active retainer projects that are due.
@@ -658,6 +661,7 @@ function App() {
         ) : (
           <>
             {tab === "dashboard" && <Dashboard ctx={ctx} goTo={setTab} />}
+            {tab === "todos" && <TodosView ctx={ctx} />}
             {tab === "clients" && <ClientsView ctx={ctx} />}
             {tab === "employees" && <EmployeesView ctx={ctx} />}
             {tab === "projects" && <ProjectsView ctx={ctx} />}
@@ -1177,6 +1181,203 @@ function EmployeeForm({ initial, onSave }) {
   );
 }
 
+/* ------------------------------ Todos ------------------------------ */
+function TodosView({ ctx }) {
+  const { todos, projects, employees, clients } = ctx;
+  const [editing, setEditing] = useState(null);
+  const [projectFilter, setProjectFilter] = useState("all"); // all | general | <projectId>
+  const [employeeFilter, setEmployeeFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("open"); // open | done | all
+
+  const list = todos.items
+    .filter((t) => {
+      if (projectFilter === "general" && t.projectId) return false;
+      if (projectFilter !== "all" && projectFilter !== "general" && t.projectId !== projectFilter) return false;
+      if (employeeFilter !== "all" && (t.employeeId || "") !== employeeFilter) return false;
+      if (statusFilter === "open" && t.completed) return false;
+      if (statusFilter === "done" && !t.completed) return false;
+      return true;
+    })
+    .sort((a, b) => {
+      if (a.completed !== b.completed) return a.completed ? 1 : -1;
+      const da = a.dueDate || "9999-99-99";
+      const db = b.dueDate || "9999-99-99";
+      if (da !== db) return da.localeCompare(db);
+      return (b.createdAt || "").localeCompare(a.createdAt || "");
+    });
+
+  const save = (form) => {
+    if (form.id) todos.update(form.id, form);
+    else todos.add(form);
+    setEditing(null);
+  };
+
+  const toggleDone = (t) => todos.update(t.id, { completed: !t.completed, completedAt: !t.completed ? new Date().toISOString() : null });
+
+  return (
+    <div className="cd-page">
+      <PageHead
+        eyebrow="stay on top of it"
+        title="Tasks"
+        action={<Btn kind="primary" icon={Plus} onClick={() => setEditing("new")}>New task</Btn>}
+      />
+
+      <div className="cd-searchbar" style={{ maxWidth: "none", gap: 16 }}>
+        <select value={projectFilter} onChange={(e) => setProjectFilter(e.target.value)}>
+          <option value="all">All tasks</option>
+          <option value="general">General (no project)</option>
+          {projects.items.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
+        {employees.items.length > 0 && (
+          <select value={employeeFilter} onChange={(e) => setEmployeeFilter(e.target.value)}>
+            <option value="all">Everyone</option>
+            <option value="">Unassigned / me</option>
+            {employees.items.map((emp) => <option key={emp.id} value={emp.id}>{emp.name}</option>)}
+          </select>
+        )}
+        <div className="cd-tabs">
+          {["open", "done", "all"].map((f) => (
+            <button key={f} className={"cd-tab" + (statusFilter === f ? " active" : "")} onClick={() => setStatusFilter(f)}>{f}</button>
+          ))}
+        </div>
+      </div>
+
+      {list.length === 0 ? (
+        <Empty icon={CheckSquare} title="No tasks here" hint="Create a task, optionally link it to a project, and assign it to yourself or a team member." />
+      ) : (
+        <ul className="cd-list">
+          {list.map((t) => {
+            const project = projects.items.find((p) => p.id === t.projectId);
+            const employee = employees.items.find((e) => e.id === t.employeeId);
+            const overdue = !t.completed && t.dueDate && t.dueDate < todayISO();
+            return (
+              <li className="cd-list-row" key={t.id} style={{ alignItems: "flex-start" }}>
+                <input type="checkbox" checked={!!t.completed} onChange={() => toggleDone(t)} style={{ marginTop: 3 }} />
+                <div style={{ flex: 1 }}>
+                  <div className="cd-list-title" style={{ textDecoration: t.completed ? "line-through" : "none", color: t.completed ? "var(--ink-soft)" : "inherit" }}>
+                    {t.title}
+                  </div>
+                  <div className="cd-list-sub">
+                    {project ? project.name : "General"}
+                    {employee ? ` · ${employee.name}` : ""}
+                    {t.dueDate ? ` · Due ${fmtDate(t.dueDate)}` : ""}
+                    {overdue ? " · Overdue" : ""}
+                  </div>
+                  {t.notes && <div style={{ fontSize: 12.5, color: "var(--ink-soft)", marginTop: 4, whiteSpace: "pre-wrap" }}>{t.notes}</div>}
+                </div>
+                <div className="cd-row-actions">
+                  <button className="cd-iconbtn" onClick={() => setEditing(t)}><Pencil size={14} /></button>
+                  <button className="cd-iconbtn danger" onClick={() => todos.remove(t.id)}><Trash2 size={14} /></button>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      {editing && (
+        <Modal title={editing === "new" ? "New task" : "Edit task"} onClose={() => setEditing(null)}>
+          <TodoForm initial={editing === "new" ? null : editing} projects={projects.items} employees={employees.items} onSave={save} />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function TodoForm({ initial, projects, employees, onSave }) {
+  const [form, setForm] = useState(initial || { title: "", notes: "", projectId: "", employeeId: "", dueDate: "", completed: false });
+  const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+  return (
+    <form className="cd-form" onSubmit={(e) => { e.preventDefault(); onSave(form); }}>
+      <Field label="Task"><input required value={form.title} onChange={set("title")} placeholder="What needs doing?" autoFocus /></Field>
+      <div className="cd-form-row">
+        <Field label="Project (optional)">
+          <select value={form.projectId} onChange={set("projectId")}>
+            <option value="">General — no project</option>
+            {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </Field>
+        <Field label="Due date (optional)"><input type="date" value={form.dueDate} onChange={set("dueDate")} /></Field>
+      </div>
+      {employees && employees.length > 0 && (
+        <Field label="Assign to">
+          <select value={form.employeeId} onChange={set("employeeId")}>
+            <option value="">Me / unassigned</option>
+            {employees.map((emp) => <option key={emp.id} value={emp.id}>{emp.name}</option>)}
+          </select>
+        </Field>
+      )}
+      <Field label="Notes (optional)"><textarea rows={3} value={form.notes} onChange={set("notes")} placeholder="Any extra detail…" /></Field>
+      <div className="cd-form-actions"><Btn kind="primary" type="submit">Save task</Btn></div>
+    </form>
+  );
+}
+
+// Compact task list embedded inside a project's Tracker & Gantt — same
+// `todos` data as the main Tasks tab, just filtered to this one project.
+function ProjectTaskList({ ctx, projectId }) {
+  const { todos, employees } = ctx;
+  const [title, setTitle] = useState("");
+  const [employeeId, setEmployeeId] = useState("");
+  const [dueDate, setDueDate] = useState("");
+
+  const list = todos.items
+    .filter((t) => t.projectId === projectId)
+    .sort((a, b) => {
+      if (a.completed !== b.completed) return a.completed ? 1 : -1;
+      const da = a.dueDate || "9999-99-99";
+      const db = b.dueDate || "9999-99-99";
+      return da.localeCompare(db);
+    });
+
+  const toggleDone = (t) => todos.update(t.id, { completed: !t.completed, completedAt: !t.completed ? new Date().toISOString() : null });
+
+  const addTask = (e) => {
+    e.preventDefault();
+    if (!title.trim()) return;
+    todos.add({ title: title.trim(), notes: "", projectId, employeeId: employeeId || "", dueDate: dueDate || "", completed: false });
+    setTitle(""); setEmployeeId(""); setDueDate("");
+  };
+
+  return (
+    <div>
+      {list.length === 0 ? (
+        <div className="cd-hint">No tasks yet for this project.</div>
+      ) : (
+        <ul className="cd-list">
+          {list.map((t) => {
+            const employee = employees.items.find((e) => e.id === t.employeeId);
+            const overdue = !t.completed && t.dueDate && t.dueDate < todayISO();
+            return (
+              <li className="cd-list-row" key={t.id}>
+                <input type="checkbox" checked={!!t.completed} onChange={() => toggleDone(t)} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 13, textDecoration: t.completed ? "line-through" : "none", color: t.completed ? "var(--ink-soft)" : "inherit" }}>{t.title}</div>
+                  <div className="cd-list-sub">
+                    {employee ? employee.name : "Unassigned"}{t.dueDate ? ` · Due ${fmtDate(t.dueDate)}` : ""}{overdue ? " · Overdue" : ""}
+                  </div>
+                </div>
+                <button className="cd-iconbtn danger" onClick={() => todos.remove(t.id)}><Trash2 size={14} /></button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      <form onSubmit={addTask} className="cd-form-row" style={{ marginTop: 10, alignItems: "flex-end" }}>
+        <input placeholder="Add a task…" value={title} onChange={(e) => setTitle(e.target.value)} style={{ flex: 2 }} />
+        {employees.items.length > 0 && (
+          <select value={employeeId} onChange={(e) => setEmployeeId(e.target.value)}>
+            <option value="">Unassigned</option>
+            {employees.items.map((emp) => <option key={emp.id} value={emp.id}>{emp.name}</option>)}
+          </select>
+        )}
+        <input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
+        <Btn kind="primary" type="submit" icon={Plus}>Add</Btn>
+      </form>
+    </div>
+  );
+}
+
 /* ------------------------------ Projects ------------------------------ */
 function ProjectsView({ ctx }) {
   const { clients, projects, timeEntries, quotes, projectUpdates, employees, settings } = ctx;
@@ -1267,6 +1468,7 @@ function ProjectsView({ ctx }) {
             employees={employees.items}
             timeEntries={timeEntries.items}
             hoursPerDay={settings.settings.hoursPerProjectDay}
+            ctx={ctx}
           />
         </Modal>
       )}
@@ -1358,7 +1560,7 @@ function ProjectForm({ initial, clients, employees, defaultRate, defaultCurrency
 }
 
 /* ------------------------------ Project Tracker ------------------------------ */
-function ProjectTracker({ project, quotes, projects, updates, employees, timeEntries, hoursPerDay }) {
+function ProjectTracker({ project, quotes, projects, updates, employees, timeEntries, hoursPerDay, ctx }) {
   const [decks, setDecks] = useState(project.decks || []);
   const linkedQuote = quotes.find((q) => q.id === project.quoteId);
   const [linkQuoteId, setLinkQuoteId] = useState("");
@@ -1522,6 +1724,9 @@ function ProjectTracker({ project, quotes, projects, updates, employees, timeEnt
             : <>Starting <strong>{fmtDate(projectStartDate)}</strong>, projected completion: <strong>{fmtDate(schedule.projectedCompletion)}</strong> — based on {hoursPerDay || 2}h/day on this project, Mon–Fri.</>}
         </div>
       )}
+
+      <div className="cd-subhead" style={{ marginTop: 18 }}>Tasks</div>
+      <ProjectTaskList ctx={ctx} projectId={project.id} />
 
       <div className="cd-subhead" style={{ marginTop: 18 }}>Project updates</div>
       <form onSubmit={addUpdate} className="cd-form">
