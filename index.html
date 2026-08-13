@@ -757,7 +757,7 @@ function projectName(projects, id) {
 
 /* ------------------------------ Dashboard ------------------------------ */
 function Dashboard({ ctx, goTo }) {
-  const { clients, projects, timeEntries, meetings, invoices, comms, personalTime, employees } = ctx;
+  const { clients, projects, timeEntries, meetings, invoices, comms, personalTime, employees, todos } = ctx;
   const [logging, setLogging] = useState(false);
 
   const activeProjects = projects.items.filter((p) => p.status === "active");
@@ -770,6 +770,11 @@ function Dashboard({ ctx, goTo }) {
   const outstandingLabel = Object.keys(outstandingByCurrency).length === 0
     ? fmtMoney(0)
     : Object.entries(outstandingByCurrency).map(([cur, amt]) => fmtMoney(amt, cur)).join(" · ");
+
+  const todaysTasks = todos.items
+    .filter((t) => !t.completed && t.dueDate && t.dueDate <= todayISO())
+    .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+  const toggleTaskDone = (t) => todos.update(t.id, { completed: !t.completed, completedAt: !t.completed ? new Date().toISOString() : null });
 
   const now = new Date();
   const weekStart = new Date(now); weekStart.setDate(now.getDate() - now.getDay());
@@ -816,6 +821,37 @@ function Dashboard({ ctx, goTo }) {
         <StatCard label="Outstanding" value={outstandingLabel} onClick={() => goTo("billing")} accent="danger" small />
         <StatCard label="Clients on file" value={clients.items.length} onClick={() => goTo("clients")} />
       </div>
+
+      <section className="cd-card">
+        <div className="cd-card-head">
+          <h3>Today's tasks</h3>
+          <Btn onClick={() => goTo("todos")}>View all tasks</Btn>
+        </div>
+        {todaysTasks.length === 0 ? (
+          <Empty icon={CheckSquare} title="Nothing due today" hint="You're clear — check the Tasks tab for anything further out." />
+        ) : (
+          <ul className="cd-list">
+            {todaysTasks.map((t) => {
+              const project = projects.items.find((p) => p.id === t.projectId);
+              const employee = employees.items.find((e) => e.id === t.employeeId);
+              const overdue = t.dueDate < todayISO();
+              return (
+                <li className="cd-list-row" key={t.id}>
+                  <input type="checkbox" checked={!!t.completed} onChange={() => toggleTaskDone(t)} />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13.5 }}>{t.title}</div>
+                    <div className="cd-list-sub">
+                      {project ? project.name : "General"}
+                      {employee ? ` · ${employee.name}` : ""}
+                      {overdue ? " · Overdue" : " · Due today"}
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
 
       <div className="cd-grid-2">
         <section className="cd-card">
