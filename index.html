@@ -1452,6 +1452,9 @@ function ProjectsView({ ctx }) {
           {list.map((p) => {
             const hrs = timeEntries.items.filter((t) => t.projectId === p.id).reduce((s, t) => s + Number(t.hours || 0), 0);
             const pct = p.budgetHours ? Math.min(100, (hrs / p.budgetHours) * 100) : null;
+            const valueOfHours = hrs * Number(p.hourlyRate || 0);
+            const budgetPct = p.budgetAmount ? (valueOfHours / p.budgetAmount) * 100 : null;
+            const budgetBarColor = budgetPct === null ? undefined : budgetPct > 100 ? "var(--danger)" : budgetPct >= 80 ? "var(--amber)" : "var(--accent)";
             const assigned = employees.items.filter((e) => (p.assignedEmployeeIds || []).includes(e.id));
             return (
               <div className="cd-card" key={p.id}>
@@ -1478,6 +1481,13 @@ function ProjectsView({ ctx }) {
                 {pct !== null && (
                   <div className="cd-bar"><div className="cd-bar-fill" style={{ width: `${pct}%` }} /></div>
                 )}
+                {p.budgetAmount ? (
+                  <>
+                    <div className="cd-kv"><span>Budget</span><span className="mono">{fmtMoney(p.budgetAmount, p.currency)}</span></div>
+                    <div className="cd-kv"><span>Value of hours</span><span className="mono">{fmtMoney(valueOfHours, p.currency)} ({Math.round(budgetPct)}%)</span></div>
+                    <div className="cd-bar"><div className="cd-bar-fill" style={{ width: `${Math.min(100, budgetPct)}%`, background: budgetBarColor }} /></div>
+                  </>
+                ) : null}
                 {p.notes && <div className="cd-notes">{p.notes}</div>}
                 <div className="cd-form-actions" style={{ marginTop: 10 }}>
                   <Btn icon={BarChart3} onClick={() => setTracking(p)}>Tracker &amp; Gantt</Btn>
@@ -1514,7 +1524,7 @@ function ProjectsView({ ctx }) {
 
 function ProjectForm({ initial, clients, employees, defaultRate, defaultCurrency, onSave }) {
   const [form, setForm] = useState(initial || {
-    name: "", clientId: clients[0]?.id || "", status: "active", hourlyRate: defaultRate ?? 100, currency: defaultCurrency || "USD", budgetHours: "", notes: "",
+    name: "", clientId: clients[0]?.id || "", status: "active", hourlyRate: defaultRate ?? 100, currency: defaultCurrency || "USD", budgetHours: "", budgetAmount: "", notes: "",
     isRetainer: false, retainerAmount: "", retainerDay: 1, priority: "", startDate: todayISO(), assignedEmployeeIds: [],
   });
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
@@ -1529,6 +1539,7 @@ function ProjectForm({ initial, clients, employees, defaultRate, defaultCurrency
         ...form,
         hourlyRate: Number(form.hourlyRate) || 0,
         budgetHours: form.budgetHours ? Number(form.budgetHours) : "",
+        budgetAmount: form.budgetAmount ? Number(form.budgetAmount) : "",
         retainerAmount: form.isRetainer ? Number(form.retainerAmount) || 0 : "",
         retainerDay: form.isRetainer ? Number(form.retainerDay) || 1 : "",
         priority: form.priority === "" ? "" : Number(form.priority),
@@ -1557,7 +1568,10 @@ function ProjectForm({ initial, clients, employees, defaultRate, defaultCurrency
       </div>
       <div className="cd-form-row">
         <Field label="Budget hours (optional)"><input type="number" min="0" step="0.5" value={form.budgetHours} onChange={set("budgetHours")} placeholder="e.g. 80" /></Field>
+        <Field label={`Budget amount (optional, ${form.currency})`}><input type="number" min="0" step="1" value={form.budgetAmount} onChange={set("budgetAmount")} placeholder="e.g. 50000" /></Field>
         <Field label="Priority (for ordering, optional)"><input type="number" min="1" step="1" value={form.priority} onChange={set("priority")} placeholder="unset = last" /></Field>
+      </div>
+      <div className="cd-form-row">
         <Field label="Start date"><input type="date" value={form.startDate} onChange={set("startDate")} /></Field>
       </div>
       <Field label="Notes"><textarea rows={3} value={form.notes} onChange={set("notes")} placeholder="Scope, stack, links…" /></Field>
@@ -3732,6 +3746,18 @@ function ReportsView({ ctx }) {
   });
   clientRows.sort((a, b) => b.invoiced - a.invoiced);
 
+  // per-project budget vs. value-of-hours, for projects with a budget set
+  const budgetRows = projects.items
+    .filter((p) => p.budgetAmount)
+    .map((p) => {
+      const hrs = timeEntries.items.filter((t) => t.projectId === p.id).reduce((s, t) => s + Number(t.hours || 0), 0);
+      const valueOfHours = hrs * Number(p.hourlyRate || 0);
+      const pctUsed = p.budgetAmount ? (valueOfHours / p.budgetAmount) * 100 : null;
+      const client = clients.items.find((c) => c.id === p.clientId);
+      return { project: p, client, hrs, valueOfHours, pctUsed, remaining: p.budgetAmount - valueOfHours };
+    })
+    .sort((a, b) => b.pctUsed - a.pctUsed);
+
   return (
     <div className="cd-page">
       <PageHead eyebrow="numbers" title="Reports" />
@@ -3762,6 +3788,28 @@ function ReportsView({ ctx }) {
           </tbody>
         </table>
       </section>
+
+      {budgetRows.length > 0 && (
+        <section className="cd-card">
+          <div className="cd-card-head"><h3>Project budget status</h3></div>
+          <table className="cd-table">
+            <thead><tr><th>Project</th><th>Client</th><th>Hours</th><th>Value of hours</th><th>Budget</th><th>% used</th><th>Remaining</th></tr></thead>
+            <tbody>
+              {budgetRows.map((r) => (
+                <tr key={r.project.id}>
+                  <td>{r.project.name}</td>
+                  <td>{r.client ? (r.client.company || r.client.name) : "—"}</td>
+                  <td className="mono">{fmtHrs(r.hrs)}</td>
+                  <td className="mono">{fmtMoney(r.valueOfHours, r.project.currency)}</td>
+                  <td className="mono">{fmtMoney(r.project.budgetAmount, r.project.currency)}</td>
+                  <td className="mono" style={{ color: r.pctUsed > 100 ? "var(--danger)" : r.pctUsed >= 80 ? "var(--amber)" : undefined }}>{Math.round(r.pctUsed)}%</td>
+                  <td className="mono">{fmtMoney(r.remaining, r.project.currency)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
 
       <section className="cd-card">
         <div className="cd-card-head"><h3>Per-client profitability</h3></div>
