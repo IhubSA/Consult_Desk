@@ -3314,7 +3314,12 @@ function BillingView({ ctx }) {
       <PageHead
         eyebrow="money"
         title="Billing"
-        action={<Btn kind="primary" icon={Plus} onClick={() => setEditing("new")} disabled={clients.items.length === 0}>New invoice</Btn>}
+        action={
+          <div className="cd-row-actions">
+            <Btn icon={Printer} onClick={() => printDocument('.cd-printable')}>Print / Save as PDF</Btn>
+            <Btn kind="primary" icon={Plus} onClick={() => setEditing("new")} disabled={clients.items.length === 0}>New invoice</Btn>
+          </div>
+        }
       />
 
       <div className="cd-tabs">
@@ -3325,33 +3330,44 @@ function BillingView({ ctx }) {
 
       {invoices.items.length === 0 ? (
         <Empty icon={Receipt} title="No invoices yet" hint="Generate one from logged, unbilled hours." />
-      ) : list.length === 0 ? (
-        <Empty icon={Receipt} title="Nothing here" />
       ) : (
-        <table className="cd-table">
-          <thead><tr><th>Number</th><th>Client</th><th>Date</th><th>Due</th><th>Currency</th><th>Total</th><th>Status</th><th /></tr></thead>
-          <tbody>
-            {list.map((inv) => (
-              <tr key={inv.id}>
-                <td className="mono">{inv.number}</td>
-                <td>{clientName(clients, inv.clientId)}</td>
-                <td className="mono">{fmtDate(inv.date)}</td>
-                <td className="mono">{fmtDate(inv.dueDate)}</td>
-                <td className="mono">{inv.currency || "USD"}</td>
-                <td className="mono">{fmtMoney(invoiceTotal(inv), inv.currency)}</td>
-                <td><Stamp status={inv.status} /></td>
-                <td>
-                  <div className="cd-row-actions">
-                    <button className="cd-iconbtn" onClick={() => setViewing(inv)} title="View / statement"><FileText size={14} /></button>
-                    {inv.status === "draft" && <button className="cd-iconbtn" onClick={() => setStatus(inv, "sent")} title="Mark sent"><Send size={14} /></button>}
-                    {inv.status !== "paid" && <button className="cd-iconbtn" onClick={() => setStatus(inv, "paid")} title="Mark paid"><CircleCheck size={14} /></button>}
-                    <button className="cd-iconbtn danger" onClick={() => { if (confirm("Delete this invoice?")) invoices.remove(inv.id); }}><Trash2 size={14} /></button>
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div className="cd-doc cd-printable">
+          <div className="cd-doc-letterhead">
+            <img src={LOGO_DATA_URI} alt={settings.settings.companyName || "Company logo"} className="cd-doc-logo" />
+            <div>
+              <div className="cd-doc-company">{settings.settings.companyName}</div>
+              <div className="cd-muted">Billing summary ({filter}) — {fmtDate(todayISO())}</div>
+            </div>
+          </div>
+          {list.length === 0 ? (
+            <Empty icon={Receipt} title="Nothing here" />
+          ) : (
+            <table className="cd-table">
+              <thead><tr><th>Number</th><th>Client</th><th>Date</th><th>Due</th><th>Currency</th><th>Total</th><th>Status</th><th className="cd-form-actions" /></tr></thead>
+              <tbody>
+                {list.map((inv) => (
+                  <tr key={inv.id}>
+                    <td className="mono">{inv.number}</td>
+                    <td>{clientName(clients, inv.clientId)}</td>
+                    <td className="mono">{fmtDate(inv.date)}</td>
+                    <td className="mono">{fmtDate(inv.dueDate)}</td>
+                    <td className="mono">{inv.currency || "USD"}</td>
+                    <td className="mono">{fmtMoney(invoiceTotal(inv), inv.currency)}</td>
+                    <td><Stamp status={inv.status} /></td>
+                    <td className="cd-form-actions">
+                      <div className="cd-row-actions">
+                        <button className="cd-iconbtn" onClick={() => setViewing(inv)} title="View / statement"><FileText size={14} /></button>
+                        {inv.status === "draft" && <button className="cd-iconbtn" onClick={() => setStatus(inv, "sent")} title="Mark sent"><Send size={14} /></button>}
+                        {inv.status !== "paid" && <button className="cd-iconbtn" onClick={() => setStatus(inv, "paid")} title="Mark paid"><CircleCheck size={14} /></button>}
+                        <button className="cd-iconbtn danger" onClick={() => { if (confirm("Delete this invoice?")) invoices.remove(inv.id); }}><Trash2 size={14} /></button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
       )}
 
       {editing && (
