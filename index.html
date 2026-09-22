@@ -3316,7 +3316,7 @@ function BillingView({ ctx }) {
         title="Billing"
         action={
           <div className="cd-row-actions">
-            <Btn icon={Printer} onClick={() => printDocument('.cd-printable')}>Print / Save as PDF</Btn>
+            <Btn icon={Printer} onClick={() => printDocument('.cd-printable-list')}>Print / Save as PDF</Btn>
             <Btn kind="primary" icon={Plus} onClick={() => setEditing("new")} disabled={clients.items.length === 0}>New invoice</Btn>
           </div>
         }
@@ -3331,7 +3331,7 @@ function BillingView({ ctx }) {
       {invoices.items.length === 0 ? (
         <Empty icon={Receipt} title="No invoices yet" hint="Generate one from logged, unbilled hours." />
       ) : (
-        <div className="cd-doc cd-printable">
+        <div className="cd-doc cd-printable-list">
           <div className="cd-doc-letterhead">
             <img src={LOGO_DATA_URI} alt={settings.settings.companyName || "Company logo"} className="cd-doc-logo" />
             <div>
@@ -4288,16 +4288,16 @@ const CSS = `
 
 @media print{
   body *{visibility:hidden;}
-  .cd-printable,.cd-printable *{visibility:visible;}
+  .cd-printable,.cd-printable *,.cd-printable-list,.cd-printable-list *{visibility:visible;}
   .cd-sidebar{display:none;}
-  .cd-page > *:not(.cd-printable):not(.cd-modal-backdrop){display:none;}
+  .cd-page > *:not(.cd-printable):not(.cd-printable-list):not(.cd-modal-backdrop){display:none;}
   .cd-main{padding:0;max-width:none;}
   .cd-modal-backdrop{position:static;display:block;padding:0;}
   .cd-modal{width:100%;max-width:none;max-height:none;overflow:visible;box-shadow:none;border-radius:0;}
   .cd-modal-head{display:none;}
   .cd-modal-body{padding:0;}
-  .cd-printable{width:100%;}
-  .cd-printable .cd-form-actions{display:none;}
+  .cd-printable,.cd-printable-list{width:100%;}
+  .cd-printable .cd-form-actions,.cd-printable-list .cd-form-actions{display:none;}
 }
 
 @media (max-width: 860px){
