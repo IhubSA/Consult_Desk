@@ -566,7 +566,14 @@ const NAV = [
   { key: "admin", label: "Admin", icon: Settings },
 ];
 
-function App() {
+const MEMBER_NAV = [
+  { key: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { key: "todos", label: "Tasks", icon: CheckSquare },
+  { key: "time", label: "Time", icon: Clock },
+];
+const MEMBER_TAB_KEYS = MEMBER_NAV.map((n) => n.key);
+
+function App({ session }) {
   const [tab, setTab] = useState("dashboard");
 
   const clients = useCollection("clients");
@@ -588,11 +595,20 @@ function App() {
   const ctx = { clients, projects, timeEntries, meetings, invoices, clientNotes, comms, expenses, quotes, projectUpdates, personalTime, concepts, employees, todos, settings: settingsHook };
   const loading = !clients.ready || !projects.ready || !timeEntries.ready || !meetings.ready || !invoices.ready || !clientNotes.ready || !comms.ready || !expenses.ready || !quotes.ready || !projectUpdates.ready || !personalTime.ready || !concepts.ready || !employees.ready || !todos.ready || !settingsHook.ready;
 
+  // Multi-user access: resolve which employee record (if any) this login is linked to,
+  // and what they're allowed to see. RLS enforces this at the database level too —
+  // this is just what drives the UI.
+  const myEmployee = !loading ? employees.items.find((e) => e.userId === session?.user?.id) : null;
+  const isOwner = !loading && myEmployee?.accessRole === "owner";
+  const isMember = !loading && myEmployee?.accessRole === "member";
+  const isUnlinked = !loading && !myEmployee;
+
   // Automations: run once per session after data loads — flip overdue invoices,
   // and generate draft retainer invoices for active retainer projects that are due.
+  // Owner-only: members don't have access to invoices at all (RLS would reject the write).
   const automationRan = useRef(false);
   useEffect(() => {
-    if (loading || automationRan.current) return;
+    if (loading || automationRan.current || !isOwner) return;
     automationRan.current = true;
 
     const today = todayISO();
@@ -630,19 +646,42 @@ function App() {
     }
   }, [loading]);
 
+  if (!loading && isUnlinked) {
+    return (
+      <div className="cd-root">
+        <style>{CSS}</style>
+        <main className="cd-main" style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <div className="cd-card" style={{ maxWidth: 420, textAlign: "center" }}>
+            <img src={LOGO_DATA_URI} alt={settingsHook.settings.companyName || "ihubSA"} style={{ width: 160, margin: "0 auto 16px" }} />
+            <h3>Account not linked</h3>
+            <p style={{ fontSize: 13.5, color: "#5B616E" }}>
+              Your login isn't linked to a team member profile yet, so there's nothing to show you here. Ask the account owner to link your login from the Team page.
+            </p>
+            <div className="cd-form-actions" style={{ justifyContent: "center" }}>
+              <Btn kind="primary" onClick={() => sb.auth.signOut()}>Sign out</Btn>
+            </div>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+  const navList = isMember ? MEMBER_NAV : NAV;
+  const activeTab = isMember && !MEMBER_TAB_KEYS.includes(tab) ? "dashboard" : tab;
+
   return (
     <div className="cd-root">
       <style>{CSS}</style>
       <aside className="cd-sidebar">
         <div className="cd-brand">
           <img src={LOGO_DATA_URI} alt={settingsHook.settings.companyName || "ihubSA"} className="cd-brand-logo" />
-          <div className="cd-brand-sub">billing &amp; ops ledger</div>
+          <div className="cd-brand-sub">{isMember ? `signed in as ${myEmployee?.name || "team member"}` : "billing & ops ledger"}</div>
         </div>
         <nav className="cd-nav">
-          {NAV.map((n) => (
+          {navList.map((n) => (
             <button
               key={n.key}
-              className={"cd-nav-item" + (tab === n.key ? " active" : "")}
+              className={"cd-nav-item" + (activeTab === n.key ? " active" : "")}
               onClick={() => setTab(n.key)}
             >
               <n.icon size={17} strokeWidth={1.8} />
@@ -658,23 +697,29 @@ function App() {
       <main className="cd-main">
         {loading ? (
           <div className="cd-loading">loading ledger…</div>
+        ) : isMember ? (
+          <>
+            {activeTab === "dashboard" && <MemberDashboard ctx={ctx} employee={myEmployee} goTo={setTab} />}
+            {activeTab === "todos" && <TodosView ctx={ctx} />}
+            {activeTab === "time" && <TimeView ctx={ctx} hidePersonal />}
+          </>
         ) : (
           <>
-            {tab === "dashboard" && <Dashboard ctx={ctx} goTo={setTab} />}
-            {tab === "todos" && <TodosView ctx={ctx} />}
-            {tab === "clients" && <ClientsView ctx={ctx} />}
-            {tab === "employees" && <EmployeesView ctx={ctx} />}
-            {tab === "projects" && <ProjectsView ctx={ctx} />}
-            {tab === "overview" && <OverviewView ctx={ctx} />}
-            {tab === "time" && <TimeView ctx={ctx} />}
-            {tab === "schedule" && <ScheduleView ctx={ctx} />}
-            {tab === "concepts" && <ConceptsView ctx={ctx} />}
-            {tab === "quotes" && <QuotesView ctx={ctx} />}
-            {tab === "billing" && <BillingView ctx={ctx} />}
-            {tab === "messages" && <MessagesView ctx={ctx} />}
-            {tab === "reports" && <ReportsView ctx={ctx} />}
-            {tab === "ledger" && <LedgerView ctx={ctx} />}
-            {tab === "admin" && <AdminView ctx={ctx} />}
+            {activeTab === "dashboard" && <Dashboard ctx={ctx} goTo={setTab} />}
+            {activeTab === "todos" && <TodosView ctx={ctx} />}
+            {activeTab === "clients" && <ClientsView ctx={ctx} />}
+            {activeTab === "employees" && <EmployeesView ctx={ctx} />}
+            {activeTab === "projects" && <ProjectsView ctx={ctx} />}
+            {activeTab === "overview" && <OverviewView ctx={ctx} />}
+            {activeTab === "time" && <TimeView ctx={ctx} />}
+            {activeTab === "schedule" && <ScheduleView ctx={ctx} />}
+            {activeTab === "concepts" && <ConceptsView ctx={ctx} />}
+            {activeTab === "quotes" && <QuotesView ctx={ctx} />}
+            {activeTab === "billing" && <BillingView ctx={ctx} />}
+            {activeTab === "messages" && <MessagesView ctx={ctx} />}
+            {activeTab === "reports" && <ReportsView ctx={ctx} />}
+            {activeTab === "ledger" && <LedgerView ctx={ctx} />}
+            {activeTab === "admin" && <AdminView ctx={ctx} />}
           </>
         )}
       </main>
@@ -971,6 +1016,128 @@ function Dashboard({ ctx, goTo }) {
   );
 }
 
+/* A scoped dashboard for team members — only their own assigned projects, hours and tasks. */
+function MemberDashboard({ ctx, employee, goTo }) {
+  const { projects, timeEntries, todos } = ctx;
+  const [logging, setLogging] = useState(false);
+
+  const myProjects = projects.items.filter((p) => (p.assignedEmployeeIds || []).includes(employee.id));
+  const myActiveProjects = myProjects.filter((p) => p.status === "active");
+  const myTimeEntries = timeEntries.items.filter((t) => t.employeeId === employee.id);
+
+  const now = new Date();
+  const weekStart = new Date(now); weekStart.setDate(now.getDate() - now.getDay());
+  const weekStartIso = dateToISO(weekStart);
+  const days = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(weekStart); d.setDate(weekStart.getDate() + i);
+    return dateToISO(d);
+  });
+  const hoursByDay = days.map((iso) => myTimeEntries.filter((t) => t.date === iso).reduce((s, t) => s + Number(t.hours || 0), 0));
+  const maxHrs = Math.max(4, ...hoursByDay);
+  const weekHours = hoursByDay.reduce((a, b) => a + b, 0);
+
+  const myTasks = todos.items.filter((t) => t.employeeId === employee.id);
+  const todaysTasks = myTasks
+    .filter((t) => !t.completed && t.dueDate && t.dueDate <= todayISO())
+    .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+  const toggleTaskDone = (t) => todos.update(t.id, { completed: !t.completed, completedAt: !t.completed ? new Date().toISOString() : null });
+
+  const recentTime = [...myTimeEntries].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
+
+  return (
+    <div className="cd-page">
+      <PageHead
+        eyebrow={`welcome back, ${employee.name}`}
+        title="Dashboard"
+        action={<Btn kind="primary" icon={Plus} onClick={() => setLogging(true)} disabled={myProjects.length === 0}>Log time</Btn>}
+      />
+
+      <div className="cd-stat-row">
+        <StatCard label="Assigned projects" value={myActiveProjects.length} onClick={() => goTo("time")} />
+        <StatCard label="Hours this week" value={fmtHrs(weekHours)} onClick={() => goTo("time")} accent="amber" />
+        <StatCard label="Tasks due today" value={todaysTasks.length} onClick={() => goTo("todos")} />
+      </div>
+
+      <section className="cd-card">
+        <div className="cd-card-head">
+          <h3>Today's tasks</h3>
+          <Btn onClick={() => goTo("todos")}>View all tasks</Btn>
+        </div>
+        {todaysTasks.length === 0 ? (
+          <Empty icon={CheckSquare} title="Nothing due today" hint="You're clear — check the Tasks tab for anything further out." />
+        ) : (
+          <ul className="cd-list">
+            {todaysTasks.map((t) => {
+              const project = projects.items.find((p) => p.id === t.projectId);
+              const overdue = t.dueDate < todayISO();
+              return (
+                <li className="cd-list-row" key={t.id}>
+                  <input type="checkbox" checked={!!t.completed} onChange={() => toggleTaskDone(t)} />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13.5 }}>{t.title}</div>
+                    <div className="cd-list-sub">
+                      {project ? project.name : "General"}
+                      {overdue ? " · Overdue" : " · Due today"}
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+
+      <div className="cd-grid-2">
+        <section className="cd-card">
+          <div className="cd-card-head">
+            <h3>This week's punch card</h3>
+            <span className="cd-muted-mono">{weekHours.toFixed(1)}h total</span>
+          </div>
+          <div className="cd-punchcard">
+            {days.map((iso, i) => (
+              <div className="cd-punch-col" key={iso}>
+                <div className="cd-punch-track">
+                  <div className="cd-punch-fill" style={{ height: `${(hoursByDay[i] / maxHrs) * 100}%` }} />
+                </div>
+                <div className="cd-punch-label">{new Date(iso + "T00:00:00").toLocaleDateString(undefined, { weekday: "narrow" })}</div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="cd-card">
+          <div className="cd-card-head"><h3>Recent time logged</h3></div>
+          {recentTime.length === 0 ? (
+            <Empty icon={Clock} title="No hours logged yet" hint="Log time against a project from the Time tab." />
+          ) : (
+            <ul className="cd-list">
+              {recentTime.map((t) => (
+                <li key={t.id} className="cd-list-row">
+                  <div>
+                    <div className="cd-list-title">{projectName(projects, t.projectId)}</div>
+                    <div className="cd-list-sub">{t.description || "—"}</div>
+                  </div>
+                  <div className="cd-list-meta mono">{fmtHrs(t.hours)} · {fmtDate(t.date)}</div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      </div>
+
+      {myActiveProjects.length === 0 && (
+        <Empty icon={FolderKanban} title="No active projects assigned" hint="Ask the account owner to assign you to a project before you can log billable time." />
+      )}
+
+      {logging && (
+        <Modal title="Log time" onClose={() => setLogging(false)}>
+          <TimeForm initial={null} projects={myProjects} employees={[]} onSave={(form) => { logTimeEntry({ ...form, employeeId: employee.id }, ctx); setLogging(false); }} />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
 function StatCard({ label, value, onClick, accent, small }) {
   return (
     <button className={"cd-stat" + (accent ? ` accent-${accent}` : "")} onClick={onClick}>
@@ -1130,11 +1297,18 @@ function ClientForm({ initial, onSave }) {
 function EmployeesView({ ctx }) {
   const { employees, projects, timeEntries } = ctx;
   const [editing, setEditing] = useState(null);
+  const [linking, setLinking] = useState(null);
 
   const save = (form) => {
     if (form.id) employees.update(form.id, form);
     else employees.add(form);
     setEditing(null);
+  };
+
+  const unlink = (e) => {
+    if (confirm(`Unlink ${e.name}'s login? They won't be able to sign in until relinked.`)) {
+      employees.update(e.id, { userId: null });
+    }
   };
 
   return (
@@ -1170,6 +1344,21 @@ function EmployeesView({ ctx }) {
                 {e.hourlyRate ? <div className="cd-kv"><span>Rate</span><span className="mono">{fmtMoney(e.hourlyRate, e.currency)}/hr</span></div> : null}
                 <div className="cd-kv"><span>Assigned projects</span><span>{assignedProjects.length}</span></div>
                 <div className="cd-kv"><span>Hours logged</span><span className="mono">{fmtHrs(hoursLogged)}</span></div>
+                <div className="cd-kv">
+                  <span>App login</span>
+                  <span>
+                    {e.accessRole === "owner" ? (
+                      <span className="cd-stamp" style={{ "--stamp-color": "#073E6B" }}>owner access</span>
+                    ) : e.userId ? (
+                      <span className="cd-row-actions">
+                        <span className="cd-stamp" style={{ "--stamp-color": "#2E7D32" }}>linked</span>
+                        <button className="cd-iconbtn" title="Unlink login" onClick={() => unlink(e)}><X size={13} /></button>
+                      </span>
+                    ) : (
+                      <Btn onClick={() => setLinking(e)}>Link login</Btn>
+                    )}
+                  </span>
+                </div>
                 {e.notes && <div className="cd-notes">{e.notes}</div>}
               </div>
             );
@@ -1182,12 +1371,18 @@ function EmployeesView({ ctx }) {
           <EmployeeForm initial={editing === "new" ? null : editing} onSave={save} />
         </Modal>
       )}
+
+      {linking && (
+        <Modal title={`Link ${linking.name}'s login`} onClose={() => setLinking(null)}>
+          <LinkAccountForm employee={linking} onDone={() => setLinking(null)} />
+        </Modal>
+      )}
     </div>
   );
 }
 
 function EmployeeForm({ initial, onSave }) {
-  const [form, setForm] = useState(initial || { name: "", email: "", phone: "", role: "", hourlyRate: "", currency: "USD", status: "active", notes: "" });
+  const [form, setForm] = useState(initial || { name: "", email: "", phone: "", role: "", hourlyRate: "", currency: "USD", status: "active", notes: "", accessRole: "member" });
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
   return (
     <form className="cd-form" onSubmit={(e) => { e.preventDefault(); onSave({ ...form, hourlyRate: form.hourlyRate ? Number(form.hourlyRate) : "" }); }}>
@@ -1211,8 +1406,44 @@ function EmployeeForm({ initial, onSave }) {
           </select>
         </Field>
       </div>
+      <Field label="App access level">
+        <select value={form.accessRole || "member"} onChange={set("accessRole")}>
+          <option value="member">Member — own projects, hours &amp; tasks only</option>
+          <option value="owner">Owner — full access to everything</option>
+        </select>
+      </Field>
       <Field label="Notes"><textarea rows={3} value={form.notes} onChange={set("notes")} placeholder="Skills, availability, anything useful…" /></Field>
       <div className="cd-form-actions"><Btn kind="primary" type="submit">Save</Btn></div>
+    </form>
+  );
+}
+
+/* Links a Supabase Auth login (created ahead of time in the dashboard) to an
+   employee record by email, via a security-definer RPC so the client never
+   needs direct read access to auth.users. */
+function LinkAccountForm({ employee, onDone }) {
+  const [email, setEmail] = useState(employee.email || "");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+    const { error } = await sb.rpc("link_employee_by_email", { p_employee_id: employee.id, p_email: email });
+    setLoading(false);
+    if (error) setError(error.message);
+    else onDone();
+  };
+
+  return (
+    <form className="cd-form" onSubmit={submit}>
+      <p style={{ fontSize: 13, color: "#5B616E", marginTop: 0 }}>
+        The login must already exist in Supabase (Authentication → Users → Add user) before it can be linked here. Once linked, {employee.name} can sign in with that email and password and will only see their own assigned work.
+      </p>
+      <Field label="Login email"><input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} /></Field>
+      {error && <div className="cd-login-error">{error}</div>}
+      <div className="cd-form-actions"><Btn kind="primary" type="submit" disabled={loading}>{loading ? "Linking…" : "Link account"}</Btn></div>
     </form>
   );
 }
@@ -1452,9 +1683,6 @@ function ProjectsView({ ctx }) {
           {list.map((p) => {
             const hrs = timeEntries.items.filter((t) => t.projectId === p.id).reduce((s, t) => s + Number(t.hours || 0), 0);
             const pct = p.budgetHours ? Math.min(100, (hrs / p.budgetHours) * 100) : null;
-            const valueOfHours = hrs * Number(p.hourlyRate || 0);
-            const budgetPct = p.budgetAmount ? (valueOfHours / p.budgetAmount) * 100 : null;
-            const budgetBarColor = budgetPct === null ? undefined : budgetPct > 100 ? "var(--danger)" : budgetPct >= 80 ? "var(--amber)" : "var(--accent)";
             const assigned = employees.items.filter((e) => (p.assignedEmployeeIds || []).includes(e.id));
             return (
               <div className="cd-card" key={p.id}>
@@ -1481,13 +1709,6 @@ function ProjectsView({ ctx }) {
                 {pct !== null && (
                   <div className="cd-bar"><div className="cd-bar-fill" style={{ width: `${pct}%` }} /></div>
                 )}
-                {p.budgetAmount ? (
-                  <>
-                    <div className="cd-kv"><span>Budget</span><span className="mono">{fmtMoney(p.budgetAmount, p.currency)}</span></div>
-                    <div className="cd-kv"><span>Value of hours</span><span className="mono">{fmtMoney(valueOfHours, p.currency)} ({Math.round(budgetPct)}%)</span></div>
-                    <div className="cd-bar"><div className="cd-bar-fill" style={{ width: `${Math.min(100, budgetPct)}%`, background: budgetBarColor }} /></div>
-                  </>
-                ) : null}
                 {p.notes && <div className="cd-notes">{p.notes}</div>}
                 <div className="cd-form-actions" style={{ marginTop: 10 }}>
                   <Btn icon={BarChart3} onClick={() => setTracking(p)}>Tracker &amp; Gantt</Btn>
@@ -1524,7 +1745,7 @@ function ProjectsView({ ctx }) {
 
 function ProjectForm({ initial, clients, employees, defaultRate, defaultCurrency, onSave }) {
   const [form, setForm] = useState(initial || {
-    name: "", clientId: clients[0]?.id || "", status: "active", hourlyRate: defaultRate ?? 100, currency: defaultCurrency || "USD", budgetHours: "", budgetAmount: "", notes: "",
+    name: "", clientId: clients[0]?.id || "", status: "active", hourlyRate: defaultRate ?? 100, currency: defaultCurrency || "USD", budgetHours: "", notes: "",
     isRetainer: false, retainerAmount: "", retainerDay: 1, priority: "", startDate: todayISO(), assignedEmployeeIds: [],
   });
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
@@ -1539,7 +1760,6 @@ function ProjectForm({ initial, clients, employees, defaultRate, defaultCurrency
         ...form,
         hourlyRate: Number(form.hourlyRate) || 0,
         budgetHours: form.budgetHours ? Number(form.budgetHours) : "",
-        budgetAmount: form.budgetAmount ? Number(form.budgetAmount) : "",
         retainerAmount: form.isRetainer ? Number(form.retainerAmount) || 0 : "",
         retainerDay: form.isRetainer ? Number(form.retainerDay) || 1 : "",
         priority: form.priority === "" ? "" : Number(form.priority),
@@ -1568,10 +1788,7 @@ function ProjectForm({ initial, clients, employees, defaultRate, defaultCurrency
       </div>
       <div className="cd-form-row">
         <Field label="Budget hours (optional)"><input type="number" min="0" step="0.5" value={form.budgetHours} onChange={set("budgetHours")} placeholder="e.g. 80" /></Field>
-        <Field label={`Budget amount (optional, ${form.currency})`}><input type="number" min="0" step="1" value={form.budgetAmount} onChange={set("budgetAmount")} placeholder="e.g. 50000" /></Field>
         <Field label="Priority (for ordering, optional)"><input type="number" min="1" step="1" value={form.priority} onChange={set("priority")} placeholder="unset = last" /></Field>
-      </div>
-      <div className="cd-form-row">
         <Field label="Start date"><input type="date" value={form.startDate} onChange={set("startDate")} /></Field>
       </div>
       <Field label="Notes"><textarea rows={3} value={form.notes} onChange={set("notes")} placeholder="Scope, stack, links…" /></Field>
@@ -2052,7 +2269,7 @@ function OverviewView({ ctx }) {
 }
 
 /* ------------------------------ Time ------------------------------ */
-function TimeView({ ctx }) {
+function TimeView({ ctx, hidePersonal }) {
   const { clients, projects, timeEntries, employees } = ctx;
   const [section, setSection] = useState("client"); // client | personal
   const [editing, setEditing] = useState(null);
@@ -2087,12 +2304,14 @@ function TimeView({ ctx }) {
         ) : null}
       />
 
-      <div className="cd-tabs">
-        <button className={"cd-tab" + (section === "client" ? " active" : "")} onClick={() => setSection("client")}>Client hours</button>
-        <button className={"cd-tab" + (section === "personal" ? " active" : "")} onClick={() => setSection("personal")}>Personal &amp; unbillable</button>
-      </div>
+      {!hidePersonal && (
+        <div className="cd-tabs">
+          <button className={"cd-tab" + (section === "client" ? " active" : "")} onClick={() => setSection("client")}>Client hours</button>
+          <button className={"cd-tab" + (section === "personal" ? " active" : "")} onClick={() => setSection("personal")}>Personal &amp; unbillable</button>
+        </div>
+      )}
 
-      {section === "personal" ? (
+      {section === "personal" && !hidePersonal ? (
         <PersonalTimeSection ctx={ctx} />
       ) : projects.items.length === 0 ? (
         <Empty icon={Clock} title="No projects to log against" hint="Create a project first, then log hours here." />
@@ -3314,12 +3533,7 @@ function BillingView({ ctx }) {
       <PageHead
         eyebrow="money"
         title="Billing"
-        action={
-          <div className="cd-row-actions">
-            <Btn icon={Printer} onClick={() => printDocument('.cd-printable-list')}>Print / Save as PDF</Btn>
-            <Btn kind="primary" icon={Plus} onClick={() => setEditing("new")} disabled={clients.items.length === 0}>New invoice</Btn>
-          </div>
-        }
+        action={<Btn kind="primary" icon={Plus} onClick={() => setEditing("new")} disabled={clients.items.length === 0}>New invoice</Btn>}
       />
 
       <div className="cd-tabs">
@@ -3330,44 +3544,33 @@ function BillingView({ ctx }) {
 
       {invoices.items.length === 0 ? (
         <Empty icon={Receipt} title="No invoices yet" hint="Generate one from logged, unbilled hours." />
+      ) : list.length === 0 ? (
+        <Empty icon={Receipt} title="Nothing here" />
       ) : (
-        <div className="cd-doc cd-printable-list">
-          <div className="cd-doc-letterhead">
-            <img src={LOGO_DATA_URI} alt={settings.settings.companyName || "Company logo"} className="cd-doc-logo" />
-            <div>
-              <div className="cd-doc-company">{settings.settings.companyName}</div>
-              <div className="cd-muted">Billing summary ({filter}) — {fmtDate(todayISO())}</div>
-            </div>
-          </div>
-          {list.length === 0 ? (
-            <Empty icon={Receipt} title="Nothing here" />
-          ) : (
-            <table className="cd-table">
-              <thead><tr><th>Number</th><th>Client</th><th>Date</th><th>Due</th><th>Currency</th><th>Total</th><th>Status</th><th className="cd-form-actions" /></tr></thead>
-              <tbody>
-                {list.map((inv) => (
-                  <tr key={inv.id}>
-                    <td className="mono">{inv.number}</td>
-                    <td>{clientName(clients, inv.clientId)}</td>
-                    <td className="mono">{fmtDate(inv.date)}</td>
-                    <td className="mono">{fmtDate(inv.dueDate)}</td>
-                    <td className="mono">{inv.currency || "USD"}</td>
-                    <td className="mono">{fmtMoney(invoiceTotal(inv), inv.currency)}</td>
-                    <td><Stamp status={inv.status} /></td>
-                    <td className="cd-form-actions">
-                      <div className="cd-row-actions">
-                        <button className="cd-iconbtn" onClick={() => setViewing(inv)} title="View / statement"><FileText size={14} /></button>
-                        {inv.status === "draft" && <button className="cd-iconbtn" onClick={() => setStatus(inv, "sent")} title="Mark sent"><Send size={14} /></button>}
-                        {inv.status !== "paid" && <button className="cd-iconbtn" onClick={() => setStatus(inv, "paid")} title="Mark paid"><CircleCheck size={14} /></button>}
-                        <button className="cd-iconbtn danger" onClick={() => { if (confirm("Delete this invoice?")) invoices.remove(inv.id); }}><Trash2 size={14} /></button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
+        <table className="cd-table">
+          <thead><tr><th>Number</th><th>Client</th><th>Date</th><th>Due</th><th>Currency</th><th>Total</th><th>Status</th><th /></tr></thead>
+          <tbody>
+            {list.map((inv) => (
+              <tr key={inv.id}>
+                <td className="mono">{inv.number}</td>
+                <td>{clientName(clients, inv.clientId)}</td>
+                <td className="mono">{fmtDate(inv.date)}</td>
+                <td className="mono">{fmtDate(inv.dueDate)}</td>
+                <td className="mono">{inv.currency || "USD"}</td>
+                <td className="mono">{fmtMoney(invoiceTotal(inv), inv.currency)}</td>
+                <td><Stamp status={inv.status} /></td>
+                <td>
+                  <div className="cd-row-actions">
+                    <button className="cd-iconbtn" onClick={() => setViewing(inv)} title="View / statement"><FileText size={14} /></button>
+                    {inv.status === "draft" && <button className="cd-iconbtn" onClick={() => setStatus(inv, "sent")} title="Mark sent"><Send size={14} /></button>}
+                    {inv.status !== "paid" && <button className="cd-iconbtn" onClick={() => setStatus(inv, "paid")} title="Mark paid"><CircleCheck size={14} /></button>}
+                    <button className="cd-iconbtn danger" onClick={() => { if (confirm("Delete this invoice?")) invoices.remove(inv.id); }}><Trash2 size={14} /></button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       )}
 
       {editing && (
@@ -3762,18 +3965,6 @@ function ReportsView({ ctx }) {
   });
   clientRows.sort((a, b) => b.invoiced - a.invoiced);
 
-  // per-project budget vs. value-of-hours, for projects with a budget set
-  const budgetRows = projects.items
-    .filter((p) => p.budgetAmount)
-    .map((p) => {
-      const hrs = timeEntries.items.filter((t) => t.projectId === p.id).reduce((s, t) => s + Number(t.hours || 0), 0);
-      const valueOfHours = hrs * Number(p.hourlyRate || 0);
-      const pctUsed = p.budgetAmount ? (valueOfHours / p.budgetAmount) * 100 : null;
-      const client = clients.items.find((c) => c.id === p.clientId);
-      return { project: p, client, hrs, valueOfHours, pctUsed, remaining: p.budgetAmount - valueOfHours };
-    })
-    .sort((a, b) => b.pctUsed - a.pctUsed);
-
   return (
     <div className="cd-page">
       <PageHead eyebrow="numbers" title="Reports" />
@@ -3804,28 +3995,6 @@ function ReportsView({ ctx }) {
           </tbody>
         </table>
       </section>
-
-      {budgetRows.length > 0 && (
-        <section className="cd-card">
-          <div className="cd-card-head"><h3>Project budget status</h3></div>
-          <table className="cd-table">
-            <thead><tr><th>Project</th><th>Client</th><th>Hours</th><th>Value of hours</th><th>Budget</th><th>% used</th><th>Remaining</th></tr></thead>
-            <tbody>
-              {budgetRows.map((r) => (
-                <tr key={r.project.id}>
-                  <td>{r.project.name}</td>
-                  <td>{r.client ? (r.client.company || r.client.name) : "—"}</td>
-                  <td className="mono">{fmtHrs(r.hrs)}</td>
-                  <td className="mono">{fmtMoney(r.valueOfHours, r.project.currency)}</td>
-                  <td className="mono">{fmtMoney(r.project.budgetAmount, r.project.currency)}</td>
-                  <td className="mono" style={{ color: r.pctUsed > 100 ? "var(--danger)" : r.pctUsed >= 80 ? "var(--amber)" : undefined }}>{Math.round(r.pctUsed)}%</td>
-                  <td className="mono">{fmtMoney(r.remaining, r.project.currency)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </section>
-      )}
 
       <section className="cd-card">
         <div className="cd-card-head"><h3>Per-client profitability</h3></div>
@@ -4288,16 +4457,16 @@ const CSS = `
 
 @media print{
   body *{visibility:hidden;}
-  .cd-printable,.cd-printable *,.cd-printable-list,.cd-printable-list *{visibility:visible;}
+  .cd-printable,.cd-printable *{visibility:visible;}
   .cd-sidebar{display:none;}
-  .cd-page > *:not(.cd-printable):not(.cd-printable-list):not(.cd-modal-backdrop){display:none;}
+  .cd-page > *:not(.cd-printable):not(.cd-modal-backdrop){display:none;}
   .cd-main{padding:0;max-width:none;}
   .cd-modal-backdrop{position:static;display:block;padding:0;}
   .cd-modal{width:100%;max-width:none;max-height:none;overflow:visible;box-shadow:none;border-radius:0;}
   .cd-modal-head{display:none;}
   .cd-modal-body{padding:0;}
-  .cd-printable,.cd-printable-list{width:100%;}
-  .cd-printable .cd-form-actions,.cd-printable-list .cd-form-actions{display:none;}
+  .cd-printable{width:100%;}
+  .cd-printable .cd-form-actions{display:none;}
 }
 
 @media (max-width: 860px){
@@ -4325,7 +4494,7 @@ function Root() {
   if (passwordRecovery) return <ResetPasswordScreen onDone={clearPasswordRecovery} />;
   if (!session) return <LoginScreen />;
 
-  return <App />;
+  return <App session={session} />;
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(Root));
